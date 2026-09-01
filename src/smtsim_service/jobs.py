@@ -45,6 +45,13 @@ class JobRunner:
             max_workers=settings.worker_threads, thread_name_prefix="smtsim-worker"
         )
         self._in_flight: set[Future] = set()
+        # Captured at construction, which happens in the app's lifespan and so
+        # on the event loop. It cannot be fetched later from a request handler:
+        # the handlers here are deliberately `def` rather than `async def`, so
+        # FastAPI runs them in its own threadpool -- which is what keeps the
+        # loop free while psycopg blocks -- and a threadpool worker has no
+        # running loop to ask for.
+        self._loop = asyncio.get_running_loop()
 
     def shutdown(self, wait: bool = True) -> None:
         self._executor.shutdown(wait=wait, cancel_futures=not wait)
@@ -67,10 +74,9 @@ class JobRunner:
         warmup_minutes: float,
         store_events: bool,
     ) -> None:
-        loop = asyncio.get_running_loop()
-        self._broker.open_channel(run_id)
+        self._loop.call_soon_threadsafe(self._broker.open_channel, run_id)
         future = self._executor.submit(
-            self._execute_run, loop, run_id, config, minutes, warmup_minutes, store_events
+            self._execute_run, self._loop, run_id, config, minutes, warmup_minutes, store_events
         )
         self._track(future)
 
@@ -109,11 +115,13 @@ class JobRunner:
             if database_sink is not None:
                 database_sink.flush()
 
+            # event_count is what was *persisted*, not what was produced, so a
+            # run with store_events off reports 0 rather than promising events
+            # that GET /runs/{id}/events cannot return.
+            stored = 0 if database_sink is None else database_sink.written
             stats = summarise(collector.events)
             with self._database.connection() as connection:
-                repository.mark_run_succeeded(
-                    connection, run_id, stats.to_dict(), len(collector.events)
-                )
+                repository.mark_run_succeeded(connection, run_id, stats.to_dict(), stored)
             self._close(loop, run_id, "succeeded")
 
         except BaseException as exc:  # noqa: BLE001 - the worker is the last line of defence

@@ -36,7 +36,11 @@ class Settings(BaseSettings):
     # WebSocket batching: flush on whichever of these comes first.
     ws_batch_size: int = Field(default=250, ge=1)
     ws_batch_interval_ms: int = Field(default=100, ge=1)
-    ws_queue_maxsize: int = Field(default=64, ge=1)
+    # Counted in *events*, not frames. A 480-minute shift is about 7,000
+    # events produced in a tenth of a second, so this is roughly a shift and a
+    # half of headroom for a consumer that cannot keep up. Beyond it the
+    # subscriber is disconnected; see streaming.py for why not dropped.
+    ws_queue_maxsize: int = Field(default=10000, ge=1)
 
     # Guard rails on what a client may ask for.
     max_minutes: float = Field(default=20160.0, gt=0)

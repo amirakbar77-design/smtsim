@@ -7,12 +7,20 @@ flushed when `batch_size` events have accumulated or `batch_interval_ms` has
 passed, whichever comes first.
 
 **When a client falls behind it is disconnected, not degraded.** Each subscriber
-has a bounded queue; if it fills, the subscriber is closed with WebSocket code
-1013 and told to fall back to the paginated REST endpoint. Dropping events would
-be the other option and is the wrong one here: every event in this stream
-mutates the state of the line, so a consumer that misses a `service_finished`
-shows a board stuck at a station forever. A silently wrong picture is worse than
-a visible disconnect, and the lossless replay is one HTTP call away.
+has a bounded queue of events; if it fills, the subscriber is closed with
+WebSocket code 1013 and told to fall back to the paginated REST endpoint.
+Dropping events would be the other option and is the wrong one here: every event
+in this stream mutates the state of the line, so a consumer that misses a
+`service_finished` shows a board stuck at a station forever. A silently wrong
+picture is worse than a visible disconnect, and the lossless replay is one HTTP
+call away.
+
+Worth being plain about the consequence: the simulation is not a real-time
+source. It produces a 480-minute shift in about a tenth of a second, far faster
+than any socket will carry it, so the queue is what absorbs the difference. Long
+runs can outrun any finite queue, and such a client will be disconnected and
+should replay instead. Live streaming is for watching a run in progress, not for
+guaranteeing delivery; the REST endpoint is the lossless path.
 """
 
 from __future__ import annotations
@@ -36,8 +44,11 @@ class SlowConsumer(Exception):
     """Raised when a subscriber's queue overflows."""
 
 
-@dataclass
+@dataclass(eq=False)
 class Subscriber:
+    """One WebSocket's view of a run. ``eq=False`` so it hashes by identity and
+    can live in a set: two subscribers with equal queues are still two clients."""
+
     queue: asyncio.Queue[Any]
     dropped: bool = False
 

@@ -23,23 +23,57 @@ from uuid import UUID
 
 from pydantic import BaseModel, Field, field_validator
 
-from smtsim.config import DEFAULT_LINE, LineConfig, line_config_from_dict
+from smtsim.config import (
+    DEFAULT_LINE,
+    Constant,
+    Distribution,
+    LineConfig,
+    Triangular,
+    line_config_from_dict,
+)
 
 CONFIG_EXAMPLE = DEFAULT_LINE.to_dict()
+
+
+def arrivals_advance_time(interarrival: Distribution) -> bool:
+    """Whether the arrival process can ever move the simulation clock forward.
+
+    An interarrival distribution that can only produce zero -- `constant` with
+    seconds 0, or a triangular collapsed at 0 -- makes the source process spin
+    forever scheduling zero-length timeouts at t=0. Simulated time never
+    advances, so the horizon is never reached and the run never ends.
+
+    On the command line that costs you a terminal. Through the API it
+    permanently consumes a worker thread and leaves a run in 'running' with no
+    way back, which makes it a denial of service on a public endpoint. The
+    general problem is undecidable, but this is the reachable case and it is
+    cheap to refuse. See the README on why a process pool would change the
+    calculus here.
+    """
+    if isinstance(interarrival, Constant):
+        return interarrival.seconds > 0
+    if isinstance(interarrival, Triangular):
+        return interarrival.high > 0
+    return True
 
 
 def validate_config(value: Any) -> dict[str, Any]:
     """Round-trip a config through the real dataclasses.
 
-    Raises ValueError, which FastAPI turns into a 422 naming `config` as the
-    offending field and carrying the validator's own message.
+    Raises ValueError, which FastAPI turns into a 422 naming the offending
+    field and carrying the validator's own message.
     """
     if not isinstance(value, dict):
         raise ValueError("config must be a JSON object")
     try:
-        line_config_from_dict(value)
+        config = line_config_from_dict(value)
     except (ValueError, KeyError, TypeError) as exc:
         raise ValueError(str(exc)) from None
+    if not arrivals_advance_time(config.arrivals.interarrival):
+        raise ValueError(
+            "arrivals.interarrival must be able to produce a positive time; a "
+            "distribution fixed at zero would never advance the simulation clock"
+        )
     return value
 
 

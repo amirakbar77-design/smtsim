@@ -12,7 +12,16 @@ from contextlib import asynccontextmanager
 from typing import Annotated, Any
 from uuid import UUID, uuid4
 
-from fastapi import Depends, FastAPI, HTTPException, Query, Response, WebSocket, WebSocketDisconnect
+from fastapi import (
+    Depends,
+    FastAPI,
+    HTTPException,
+    Query,
+    Request,
+    Response,
+    WebSocket,
+    WebSocketDisconnect,
+)
 from fastapi.responses import JSONResponse
 
 from smtsim_service import __version__, repository
@@ -52,6 +61,26 @@ There is no authentication. See the README.
 """
 
 
+def get_database(request: Request) -> Database:
+    return request.app.state.database
+
+
+def get_runner(request: Request) -> JobRunner:
+    return request.app.state.runner
+
+
+def get_service_settings(request: Request) -> Settings:
+    return request.app.state.settings
+
+
+# Module level, not closure level: FastAPI resolves these annotations against
+# the module namespace, so an alias defined inside create_app is invisible to it
+# and every dependency silently becomes a required query parameter.
+DatabaseDep = Annotated[Database, Depends(get_database)]
+RunnerDep = Annotated[JobRunner, Depends(get_runner)]
+SettingsDep = Annotated[Settings, Depends(get_service_settings)]
+
+
 def create_app(settings: Settings | None = None) -> FastAPI:
     settings = settings or get_settings()
 
@@ -79,15 +108,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         lifespan=lifespan,
     )
 
-    def get_database() -> Database:
-        return app.state.database
-
-    def get_runner() -> JobRunner:
-        return app.state.runner
-
-    DatabaseDep = Annotated[Database, Depends(get_database)]
-    RunnerDep = Annotated[JobRunner, Depends(get_runner)]
-
     # --- health -------------------------------------------------------------
 
     @app.get("/healthz", response_model=Health, tags=["meta"])
@@ -105,10 +125,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.post("/runs", response_model=Accepted, status_code=202, tags=["runs"])
     def create_run(
-        request: RunRequest, database: DatabaseDep, runner: RunnerDep
+        request: RunRequest,
+        database: DatabaseDep,
+        runner: RunnerDep,
+        config_settings: SettingsDep,
     ) -> Accepted:
-        if request.minutes > settings.max_minutes:
-            raise HTTPException(422, f"minutes must not exceed {settings.max_minutes:g}")
+        if request.minutes > config_settings.max_minutes:
+            raise HTTPException(422, f"minutes must not exceed {config_settings.max_minutes:g}")
         if request.warmup_minutes >= request.minutes:
             raise HTTPException(422, "warmup_minutes must be shorter than minutes")
 
@@ -255,12 +278,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.post("/comparisons", response_model=Accepted, status_code=202, tags=["comparisons"])
     def create_comparison(
-        request: ComparisonRequest, database: DatabaseDep, runner: RunnerDep
+        request: ComparisonRequest,
+        database: DatabaseDep,
+        runner: RunnerDep,
+        config_settings: SettingsDep,
     ) -> Accepted:
-        if request.seeds > settings.max_comparison_seeds:
-            raise HTTPException(422, f"seeds must not exceed {settings.max_comparison_seeds}")
-        if request.minutes > settings.max_minutes:
-            raise HTTPException(422, f"minutes must not exceed {settings.max_minutes:g}")
+        if request.seeds > config_settings.max_comparison_seeds:
+            raise HTTPException(
+                422, f"seeds must not exceed {config_settings.max_comparison_seeds}"
+            )
+        if request.minutes > config_settings.max_minutes:
+            raise HTTPException(422, f"minutes must not exceed {config_settings.max_minutes:g}")
         if request.warmup_minutes >= request.minutes:
             raise HTTPException(422, "warmup_minutes must be shorter than minutes")
 
