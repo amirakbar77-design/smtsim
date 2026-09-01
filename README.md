@@ -11,7 +11,11 @@ worked on* — without needing the real line.
 
 Stage 2 adds machine breakdowns and a paired what-if comparison. Stage 2b adds
 the conveyors between the machines, which is what turns four independent
-machines into a line: when one stops, its neighbours find out.
+machines into a line: when one stops, its neighbours find out. Stage 3 puts an
+HTTP API and Postgres around all of it, and finds out whether the I/O-free core
+was worth the trouble.
+
+![smtsim API](demo/api.gif)
 
 ![smtsim compare](demo/compare.gif)
 
@@ -175,6 +179,18 @@ src/smtsim/
                 paired-difference statistics
   compare.py    runs two configurations across shared seeds
   cli.py        argument parsing, progress display, tables — all of the I/O
+
+src/smtsim_service/   the HTTP service (stage 3). Depends on the simulation;
+                      the simulation does not know it exists, and a test
+                      enforces that.
+  settings.py     configuration from the environment
+  db.py           the psycopg connection pool
+  repository.py   all the SQL, including the COPY path for events
+  sinks.py        DatabaseSink and LoopBridgeSink — two more EventSinks
+  streaming.py    the WebSocket broker, batching and backpressure
+  jobs.py         the thread pool that keeps simulations off the event loop
+  schemas.py      request and response models
+  app.py          the routes
 ```
 
 The dependency arrows only ever point one way: `cli` → `compare` → `line`/`stats`
@@ -268,16 +284,20 @@ things follow from that.
 model against an in-memory `ListSink`; only the determinism tests touch disk, and
 only because the property under test is about bytes on disk.
 
-*A different consumer can be dropped in without changing the model.* Today the
-CLI injects a `JsonlSink` that writes lines to a file. In stage 3 a FastAPI
-service will inject a sink that pushes each event onto a WebSocket and batches
-inserts into Postgres. `line.py` will not change — it does not know the
-difference, because `EventSink` is a one-method protocol:
+*A different consumer can be dropped in without changing the model.* The CLI
+injects a `JsonlSink` that writes lines to a file. Stage 3's service injects a
+`DatabaseSink` that batches COPY inserts into Postgres and a `LoopBridgeSink`
+that hands events to an asyncio loop, both wrapped in a `FanOutSink`. `line.py`
+did not change — it cannot tell the difference, because `EventSink` is a
+one-method protocol:
 
 ```python
 class EventSink(Protocol):
     def emit(self, event: Event) -> None: ...
 ```
+
+That was the bet stages 1 and 2 were making, and stage 3 is where it was
+settled. See *The service* below for what it actually cost.
 
 *Progress reporting stays outside too.* The rich progress bar is not printed by
 the simulation; the CLI passes an `on_progress` callback that the model calls
@@ -580,6 +600,300 @@ stations would mean teaching the stats layer the routing. Explicit events keep
 the reduction topology-agnostic, and keep it correct if routing ever stops being
 a simple path.
 
+## The service
+
+Stage 3 adds a second consumer of the simulation: an HTTP API with Postgres
+behind it. The interesting question was never whether FastAPI can be wired up.
+It was whether the claim this project has been making since stage 1 -- that the
+core knows nothing about its consumers -- would survive contact with one.
+
+**It did.** Adding a database and a live event stream required writing two
+classes, both of which implement the one-method `EventSink` protocol the CLI's
+JSONL sink already implemented:
+
+```python
+class DatabaseSink:
+    def emit(self, event: Event) -> None:
+        self._pending.append(event)
+        if len(self._pending) >= self._batch_size:
+            self.flush()          # COPY into run_events
+
+
+class LoopBridgeSink:
+    def emit(self, event: Event) -> None:
+        self._loop.call_soon_threadsafe(self._deliver, event)
+```
+
+`line.py` and `stations.py` were not touched. Not a line -- and the proof is not
+an assertion of good intentions, it is a test: the same configuration and seed
+submitted through the API produces events **byte-identical** to the CLI's JSONL
+output, after travelling through a worker thread, a COPY and Postgres.
+
+What the model did gain was three optional keyword arguments in `compare.py`, so
+the service can persist a comparison's constituent runs, and a `to_dict` on the
+stats objects. Both are additions; nothing was removed and no signature the CLI
+uses changed.
+
+A test walks the AST of every module under `src/smtsim` and fails if any of them
+imports the service package or any service-only dependency. A second spawns a
+subprocess and asserts that `import smtsim` pulls in no fastapi, no psycopg, no
+pydantic. The dependency arrow is enforced, not merely intended.
+
+```
+src/smtsim/          the simulation. Depends on simpy and the standard library.
+src/smtsim_service/  the API. Depends on the simulation.
+```
+
+### Why threads and not processes
+
+The simulation is synchronous and CPU-bound; FastAPI runs an asyncio loop.
+Calling `Line.run` in a request handler would stall every other connection for
+its duration, so runs go to a `ThreadPoolExecutor` and `POST /runs` returns a job
+id immediately.
+
+The GIL is a fair objection to that and deserves a real answer rather than a
+shrug. Threads do not give this service parallelism: two simulations on two
+worker threads take about as long as running them one after the other. What
+threads *do* give is the thing actually needed here — the event loop stays
+responsive, because CPython releases the GIL every 5 ms by default and the loop
+gets its slice. A 480-minute shift is about a tenth of a second of CPU, so the
+worst case a competing request sees is a handful of milliseconds of added
+latency.
+
+Processes would give real parallelism, and they cost more than they look:
+
+- **The sink boundary would have to become a pipe.** Today a sink is a method
+  call on the same object the simulation is writing to. Across a process
+  boundary every one of 7,000 events per run would need pickling and a socket
+  write, and `loop.call_soon_threadsafe` — the whole live-streaming design —
+  stops being available. You would end up with a multiprocessing queue and a
+  reader thread, which is a thread pool with extra steps.
+- **Configs would have to be picklable and copied.** They are, but it is another
+  constraint on a model that currently has none.
+- **Memory multiplies.** Each worker carries its own interpreter and its own
+  copy of the event list.
+
+**The threshold at which I would revisit it.** Two triggers, either one
+sufficient:
+
+1. **A single run stops being short.** At a tenth of a second per shift, the GIL
+   is a rounding error. At ten seconds — multi-day horizons, or comparisons with
+   hundreds of seeds — one run monopolises the interpreter and concurrent API
+   latency becomes visible. The number to watch is the ratio of run CPU time to
+   acceptable request latency; once that exceeds roughly 100:1, move.
+2. **Untrusted configurations.** A worker thread cannot be killed in Python. A
+   configuration that makes simulated time stand still runs forever and takes a
+   worker with it — see below. A process can be killed, and if this service ever
+   accepted configs from people who are not the operator, that alone would
+   justify the move.
+
+The honest end state for either trigger is not a process pool inside the API but
+a separate worker service — the database is already the job queue in everything
+but name, since job state lives in `runs.status` rather than in memory.
+
+### A config that never finishes
+
+Found while writing the tests, and worth recording. A line whose interarrival
+distribution is fixed at zero — `{"kind": "constant", "seconds": 0}` — is
+accepted by the configuration validator and then loops forever at `t=0`,
+scheduling zero-length timeouts. Simulated time never advances, so the horizon is
+never reached and the run never ends.
+
+On the command line that costs you a terminal. Through the API it permanently
+consumes a worker thread and strands a run in `running` with no way back, which
+makes it a denial of service on an open endpoint. The service refuses such a
+config at the boundary. The general problem is undecidable, so this is a guard on
+the one reachable case rather than a solution, and it is the sharpest argument
+for processes in the list above.
+
+### Persistence
+
+Postgres, with the schema managed by Alembic. No `create_all`, no hand-made
+tables; a test asserts that no service module contains DDL at all.
+
+| table | holds |
+|---|---|
+| `runs` | status, seed, horizon, warm-up, config, summary, timestamps, error |
+| `run_events` | the event log, primary key `(run_id, seq)` |
+| `comparisons` | both configs, seed count, the paired result |
+| `comparison_runs` | which runs a comparison was built from, and their roles |
+
+Events are written with **COPY**, not row-by-row `execute`. A shift is about
+7,000 events and a 30-seed comparison is 60 runs and roughly 400,000; at that
+volume the per-statement round trip dominates everything else, and COPY turns
+the write into one streamed transfer. `DatabaseSink` buffers on the worker
+thread and pays that round trip once per 2,000 events.
+
+**`run_events.detail` is `json`, not `jsonb`, and deliberately.** jsonb is a
+parsed representation: it sorts object keys and discards the original text, so a
+detail object does not come back out the way it went in. That column exists to
+reproduce a saved log exactly, and nothing ever queries inside it. The queryable
+copy of the configuration lives on `runs.config`, which is jsonb. This was
+measured rather than assumed — a round trip through jsonb reorders
+`horizon_seconds, warmup_seconds, seed, line` into `line, seed, warmup_seconds,
+horizon_seconds`, which is enough to break the byte-identity test.
+
+The stored stream keeps the header events. `stats.summarise` reads `run_started`
+for each station's capacity, the horizon and the warm-up, so a log stripped to
+its board-level events could not be re-summarised. There is a test that
+re-summarises the stored stream and asserts it reproduces the stored summary.
+
+**Where this schema stops being appropriate.** Postgres will hold tens of
+millions of rows without complaint, so the limit is not the row count as such:
+
+- At around **a million events per run** — a 30-day horizon at this event rate —
+  a single run's insert becomes a multi-second transaction and `GET
+  /runs/{id}/events` becomes a paging exercise nobody enjoys. The fix is to stop
+  storing raw events in Postgres for finished runs: keep the summary in the
+  database and the log as a compressed object in blob storage, fetched on demand
+  for replay.
+- At **high run volume**, `run_events` is the only table that grows without
+  bound, and it is append-only and never updated. Partition it by `run_id` range
+  or by month and drop partitions on a retention policy, rather than issuing
+  large `DELETE`s.
+- For **analytics across runs** — "what was the p95 queue at the placer over
+  every run last quarter" — this row layout is the wrong shape entirely. That
+  wants a columnar store, and the summaries are already the right grain to feed
+  one.
+
+Two smaller limits already in the code. `store_events` defaults to `true` for a
+run and `false` for a comparison, because a 30-seed comparison is 400,000 events
+and you asked for a statistic, not a log. And the runner holds each run's events
+in memory to compute its summary, so peak memory grows with event count; at a
+million events that is the next thing to fix, by summarising incrementally.
+
+### The API
+
+| endpoint | |
+|---|---|
+| `GET /healthz` | liveness, plus whether the database answers |
+| `POST /runs` | 202 with a run id |
+| `GET /runs` | paginated, filterable by status |
+| `GET /runs/{id}` | status and summary |
+| `GET /runs/{id}/events` | paginated by `seq`, `?after=&limit=` |
+| `WS /runs/{id}/stream` | live events, or replay if the run has finished |
+| `DELETE /runs/{id}` | cascades to events |
+| `POST /comparisons` | 202 with a comparison id |
+| `GET /comparisons/{id}` | status, paired result, constituent runs |
+
+Requests carry a configuration as JSON, not a path: the server has no access to
+the client's filesystem.
+
+**The configuration schema is defined exactly once**, in `smtsim.config`. The
+request models take `config` as an opaque object and validate it by building the
+real dataclasses. A hand-written Pydantic mirror of `LineConfig` would be a
+second definition of four distribution kinds, capacities, failure blocks and
+buffer rules, and the two would drift. It would also have its own error
+messages; this way a buffer of zero is rejected by exactly the code that rejects
+it in the CLI:
+
+```
+422  station 'pick_and_place' input_buffer must be >= 1, or omitted for unbounded
+```
+
+The cost is that OpenAPI shows `config` as a generic object rather than a typed
+schema. That is paid for with a worked example generated from `DEFAULT_LINE`, so
+`/docs` still shows a complete, valid, copy-pasteable body — and the example
+cannot go stale, because it is derived rather than written down.
+
+The summary the API returns is the same structure the CLI prints: all four time
+accounts, the reliability figures, the bottleneck. Stage 4 renders from it and
+recomputes nothing.
+
+### Streaming, and what happens when a client falls behind
+
+`WS /runs/{id}/stream` gives stage 4 exactly one code path. Connect and read
+frames until the stream ends; whether the events are arriving from a worker
+thread or being read back out of Postgres is not the client's problem. The
+opening frame says which.
+
+Frames are **batched** — flushed when 250 events have accumulated or 100 ms have
+passed, whichever comes first, both configurable. A 480-minute run emits its
+whole log in about a tenth of a second; sent one frame per event that would be
+7,000 frames in 100 ms, which no browser will absorb. In practice the demo run
+streams 83,000 events in 326 frames.
+
+**A client that falls behind is disconnected, not degraded.** Each subscriber
+has a bounded queue of events; when it fills, the socket is closed with code
+1013 and the client is told to use `GET /runs/{id}/events`, which is lossless.
+Dropping events was the other option and is the wrong one here: every event in
+this stream mutates the state of the line, so a consumer that misses a
+`service_finished` shows a board stuck at a station forever. A silently wrong
+picture is worse than a visible disconnect when the lossless path is one HTTP
+call away.
+
+The consequence worth stating plainly: **the simulation is not a real-time
+source.** It produces a shift far faster than any socket carries it, and the
+queue is what absorbs the difference. The default holds 10,000 events, about a
+shift and a half of headroom. A long enough run will outrun any finite queue, and
+such a client should replay instead. Live streaming is for watching a run in
+progress, not for guaranteed delivery.
+
+### No authentication
+
+There is none. Every endpoint is open, anyone who can reach the port can submit
+runs, read every run and delete any of them. That is a deliberate scope
+boundary for a portfolio project, not an oversight, but it is a real gap and
+this service should not be exposed to a network you do not control. Adding it
+would mean an API key or OIDC at the edge, per-run ownership on the `runs`
+table, and rate limiting on `POST` — which is also where the untrusted-config
+problem above becomes urgent.
+
+## Running the service
+
+```bash
+cp .env.example .env      # then fill in POSTGRES_PASSWORD and SMTSIM_DATABASE_URL
+docker compose up -d --wait
+open http://localhost:8000/docs
+```
+
+`--wait` blocks until the database is healthy, the migration has run and the API
+answers its healthcheck. Then:
+
+```bash
+curl -s localhost:8000/healthz
+
+curl -s -X POST localhost:8000/runs -H 'content-type: application/json' \
+  -d '{"config": <a line config>, "minutes": 480, "warmup_minutes": 30, "seed": 42}'
+
+python scripts/stream_run.py --minutes 5000    # POST, then watch it stream
+```
+
+`make serve` wraps the compose invocation and `make demo-api` re-records the GIF
+above.
+
+**Migrations run as their own one-shot service, not on API startup.** Compose
+waits for it with `service_completed_successfully`. Migrating on boot means every
+replica races to run the same DDL, a bad migration takes down every instance at
+once with no window to intervene, and the application container needs DDL
+privileges at runtime that it otherwise would not. One explicit actor, one
+controlled step, reviewable in isolation.
+
+The image is multi-stage and built with uv: the build stage carries uv, the
+lockfile and the toolchain, and none of it reaches the 73 MB runtime image, which
+runs as an unprivileged user. Only the `service` extra is installed. The same
+image carries the CLI, so `docker compose run --rm api smtsim --version` works.
+
+Every environment variable is listed in `.env.example`. No credential is
+committed, and the three that must be set use `${VAR:?message}` in the compose
+file, so a missing password fails loudly instead of defaulting to something
+unsafe.
+
+### Running the service tests
+
+They need a real Postgres — not a mock and not SQLite, neither of which would
+exercise jsonb, enums or COPY:
+
+```bash
+docker run -d -p 55432:5432 -e POSTGRES_PASSWORD=test -e POSTGRES_USER=smtsim \
+  -e POSTGRES_DB=smtsim_test postgres:17-alpine
+export SMTSIM_TEST_DATABASE_URL=postgresql://smtsim:test@localhost:55432/smtsim_test
+uv run pytest
+```
+
+Without that variable the 31 service tests skip with those instructions and the
+169 simulation tests run as they always have.
+
 ## Warm-up
 
 Both `run` and `stats` take `--warmup MINUTES`, which excludes an opening stretch
@@ -773,8 +1087,14 @@ uv run smtsim compare configs/baseline.toml configs/two_placers.toml \
 the run was recorded with. `compare` takes two config paths plus `--seeds`,
 `--minutes`, `--warmup`, `--out` and `--verbose`.
 
-`make install`, `make test`, `make run`, `make stats`, `make compare` and
-`make demo` wrap the common commands.
+`make install`, `make test`, `make lint`, `make run`, `make stats`,
+`make compare`, `make serve` and `make demo` wrap the common commands.
+
+None of the above needs a database, a container or the service extra. The
+simulation is installable and usable on its own, which is the point of the
+optional dependency group: `uv sync` gives a lean environment with simpy and
+rich, and `uv sync --extra service` adds fastapi, psycopg and the rest. See
+*Running the service* for that side.
 
 A note on the progress bars, since honesty is cheaper than a nice demo: a
 480-minute shift simulates in about a tenth of a second, and a full 60-run
@@ -873,8 +1193,9 @@ jq -r 'select(.event=="board_completed") | .t' runs/run1.jsonl | tail -1
 uv run pytest
 ```
 
-157 tests, in about six seconds. The ones that matter are properties rather
-than golden values:
+200 tests, in about fourteen seconds with a database and six without — the 31
+service tests skip cleanly when `SMTSIM_TEST_DATABASE_URL` is unset. The ones
+that matter are properties rather than golden values:
 
 - **Determinism** — the same seed writes byte-identical files; different seeds do
   not; the progress hook and the compare run-hook do not perturb results; the
@@ -920,6 +1241,18 @@ than golden values:
   against known values, and a paired interval against an example computed by
   hand. A configuration compared against itself must give a mean difference of
   exactly zero.
+- **Layering** — the AST of every core module is walked for a forbidden import,
+  and a subprocess confirms that `import smtsim` pulls in no service dependency
+  at all. CI reinforces it by running the simulation suite in an environment
+  where those packages are not installed.
+- **The service** — run and comparison lifecycles end to end against a real
+  Postgres, event pagination, live streaming, replay of a finished run, frame
+  batching, the disconnect-on-slow-consumer policy, 422s carrying the config
+  validator's own messages, a run that fails mid-simulation recording its error
+  instead of hanging in `running`, and migrations up, down and up again.
+- **The proof** — a run submitted through the API produces events byte-identical
+  to the same seed and config through the CLI. If that passes, the core really
+  is untouched.
 
 ## Extension points
 
@@ -954,11 +1287,11 @@ blocking-after-service when one fills, starving when one empties, a four-way
 partition of each station's time, and a deadlock argument that holds for a linear
 line and would not survive a rework loop.
 
-**Stage 3 — FastAPI and Postgres.** A service that accepts a line configuration,
-runs the simulation, and streams events. The event sink becomes a database writer
-and a WebSocket publisher; the simulation core is untouched, which is the bet the
-I/O-free design has been making since stage 1. `compare` becomes a job that
-returns a comparison id.
+**Stage 3 — FastAPI and Postgres.** ✅ An HTTP and WebSocket API, simulations
+run off the event loop in a worker thread, job state and event logs in Postgres
+behind Alembic migrations, a paired comparison endpoint, Docker Compose and CI.
+The simulation core was untouched, and there is a byte-identity test that says
+so rather than a claim that hopes so.
 
 **Stage 4 — web replay UI.** Scrub through a stored run and watch boards move
 along the line, with conveyors filling and draining, stations going red when they
@@ -968,11 +1301,13 @@ rendering problem, not a simulation one.
 ## Regenerating the demo
 
 The GIFs are recorded with [VHS](https://github.com/charmbracelet/vhs) from
-`demo/demo.tape` and `demo/compare.tape`:
+`demo/demo.tape`, `demo/compare.tape` and `demo/api.tape` (which needs a
+running Docker daemon):
 
 ```bash
 brew install vhs
-make demo
+make demo        # the simulation demos
+make demo-api    # the service demo; brings the compose stack up itself
 ```
 
 ## Licence
