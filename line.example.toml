@@ -33,6 +33,15 @@ capacity = 1
 kind = "lognormal"
 mean = 52.0
 cv = 0.20
+# Breakdowns are optional. A station with no [stations.failures] block never
+# fails. mtbf is measured in OPERATING seconds -- the countdown to the next
+# failure only runs while the machine is working, so an idle machine does not
+# wear out. Time to failure is exponential; repair time is lognormal with
+# mean mttr and coefficient of variation mttr_cv.
+# [stations.failures]
+# mtbf = 5400.0
+# mttr = 420.0
+# mttr_cv = 0.6
 
 [[stations]]
 name = "spi"

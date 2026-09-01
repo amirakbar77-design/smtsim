@@ -23,8 +23,12 @@ class EventType(StrEnum):
     BOARD_ARRIVED = "board_arrived"
     QUEUE_ENTERED = "queue_entered"
     SERVICE_STARTED = "service_started"
+    SERVICE_INTERRUPTED = "service_interrupted"
+    SERVICE_RESUMED = "service_resumed"
     SERVICE_FINISHED = "service_finished"
     BOARD_COMPLETED = "board_completed"
+    STATION_FAILED = "station_failed"
+    STATION_REPAIRED = "station_repaired"
     RUN_FINISHED = "run_finished"
 
 

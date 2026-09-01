@@ -8,8 +8,10 @@ import json
 import random
 from pathlib import Path
 
-from smtsim.config import DEFAULT_LINE, LogNormal, Triangular
-from smtsim.events import JsonlSink, ListSink, open_jsonl
+from dataclasses import replace
+
+from smtsim.config import DEFAULT_LINE, FailureConfig, LogNormal, Triangular
+from smtsim.events import EventType, JsonlSink, ListSink, open_jsonl
 from smtsim.line import simulate
 
 from conftest import SHIFT_SECONDS, run_events
@@ -84,23 +86,56 @@ def test_run_is_reproducible_across_independently_built_lines() -> None:
     assert DEFAULT_LINE.seed == 42
 
 
-GOLDEN_NO_FAILURE_LOG_SHA256 = "a69523aacc819c7d70a7544200740c4153437c784a868f2b8a3fc6393c2c161c"
+GOLDEN_NO_FAILURE_MODEL_SHA256 = "c22889bab140cacfe9be0e3df87f9602a532719e6cae837dc1e261ac6092fa6b"
+
+RUN_METADATA = {EventType.RUN_STARTED, EventType.RUN_FINISHED}
 
 
-def test_the_default_line_log_matches_its_pinned_hash() -> None:
+def model_digest(minutes: float = 60.0, seed: int = 42, config=DEFAULT_LINE) -> str:
+    """Hash the board-level events of a run.
+
+    `run_started` and `run_finished` are excluded on purpose. They carry run
+    metadata that may legitimately gain fields -- stage 2 added `warmup_seconds`
+    -- and hashing them would turn every format addition into a false alarm
+    about the model. What must not move is the sequence of things that happened
+    on the line.
+    """
+    sink = ListSink()
+    simulate(minutes * 60.0, config=config, sink=sink, seed=seed)
+    payload = "".join(
+        json.dumps(event.to_dict(), separators=(",", ":")) + "\n"
+        for event in sink
+        if event.type not in RUN_METADATA
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def test_the_default_line_model_matches_its_pinned_hash() -> None:
     """A tripwire on the default, failure-free line.
 
-    Any change to the model, the stream derivation or the log format moves this
-    hash. Nothing about stage 2 should: a line with no `failures` block must
-    take exactly the path it took before breakdowns existed. Regenerate with::
-
-        python -c "import hashlib, io; from smtsim.events import JsonlSink; \
-        from smtsim.line import simulate; b = io.StringIO(); \
-        simulate(3600.0, sink=JsonlSink(b), seed=42); \
-        print(hashlib.sha256(b.getvalue().encode()).hexdigest())"
+    A line with no `failures` block must take exactly the path it took before
+    breakdowns existed: same arrivals, same service times, same order. Adding
+    the availability machinery starts no process for such a station, so this
+    hash is unchanged by stage 2. Regenerate it by printing `model_digest()`.
     """
-    buffer = io.StringIO()
-    simulate(60 * 60.0, sink=JsonlSink(buffer), seed=42)
+    assert model_digest() == GOLDEN_NO_FAILURE_MODEL_SHA256
 
-    digest = hashlib.sha256(buffer.getvalue().encode("utf-8")).hexdigest()
-    assert digest == GOLDEN_NO_FAILURE_LOG_SHA256
+
+def test_adding_failures_to_one_station_does_not_disturb_the_others() -> None:
+    """The failure stream is separate, so an unaffected station is untouched."""
+    stations = tuple(
+        replace(station, failures=FailureConfig(mtbf=1800.0, mttr=300.0))
+        if station.name == "pick_and_place"
+        else station
+        for station in DEFAULT_LINE.stations
+    )
+    with_failures = ListSink()
+    baseline = ListSink()
+    simulate(SHIFT_SECONDS, sink=baseline, seed=42)
+    simulate(SHIFT_SECONDS, config=replace(DEFAULT_LINE, stations=stations), sink=with_failures, seed=42)
+
+    def printer(sink):
+        return [(e.board_id, str(e.type), e.time) for e in sink if e.station == "solder_paste_printer"]
+
+    assert printer(baseline) == printer(with_failures)
+    assert any(e.type is EventType.STATION_FAILED for e in with_failures)

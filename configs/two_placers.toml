@@ -1,0 +1,63 @@
+# The variant: the baseline with a second placement head.
+#
+# This is the "after" side of the canonical what-if question. It differs from
+# configs/baseline.toml in exactly one character: pick_and_place capacity.
+#
+#   smtsim compare configs/baseline.toml configs/two_placers.toml \
+#       --seeds 30 --minutes 480 --warmup 30
+
+name = "SMT line 1 (two placers)"
+seed = 42
+
+[arrivals.interarrival]
+kind = "lognormal"
+mean = 57.0
+cv = 0.45
+
+[[stations]]
+name = "solder_paste_printer"
+capacity = 1
+[stations.service_time]
+kind = "lognormal"
+mean = 25.0
+cv = 0.15
+# Squeegee and stencil problems: frequent, but usually cleared in a few minutes.
+[stations.failures]
+mtbf = 7200.0
+mttr = 240.0
+mttr_cv = 0.5
+
+[[stations]]
+name = "pick_and_place"
+capacity = 2
+[stations.service_time]
+kind = "lognormal"
+mean = 52.0
+cv = 0.20
+# Feeder jams and nozzle faults. The busiest machine, so it wears fastest.
+[stations.failures]
+mtbf = 5400.0
+mttr = 420.0
+mttr_cv = 0.6
+
+[[stations]]
+name = "spi"
+capacity = 1
+[stations.service_time]
+kind = "triangular"
+low = 14.0
+mode = 17.0
+high = 26.0
+# No failures block: the inspection station never breaks down in this model.
+
+[[stations]]
+name = "reflow_oven"
+capacity = 6
+[stations.service_time]
+kind = "constant"
+seconds = 240.0
+# Rare, but a stopped belt takes every board in the tunnel with it.
+[stations.failures]
+mtbf = 28800.0
+mttr = 900.0
+mttr_cv = 0.4

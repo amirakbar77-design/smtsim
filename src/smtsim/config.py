@@ -68,6 +68,23 @@ class LogNormal:
 
 
 @dataclass(frozen=True, slots=True)
+class Exponential:
+    """Memoryless durations. Used for time between failures."""
+
+    mean: float
+
+    def __post_init__(self) -> None:
+        if self.mean <= 0:
+            raise ValueError("exponential mean must be positive")
+
+    def sample(self, rng: random.Random) -> float:
+        return rng.expovariate(1.0 / self.mean)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"kind": "exponential", "mean": self.mean}
+
+
+@dataclass(frozen=True, slots=True)
 class Triangular:
     """Bounded durations: optimistic, most likely, pessimistic."""
 
@@ -95,6 +112,7 @@ class Triangular:
 
 _DISTRIBUTION_TYPES: dict[str, type] = {
     "constant": Constant,
+    "exponential": Exponential,
     "lognormal": LogNormal,
     "triangular": Triangular,
 }
@@ -118,16 +136,54 @@ def distribution_from_dict(spec: dict[str, Any]) -> Distribution:
 
 
 @dataclass(frozen=True, slots=True)
+class FailureConfig:
+    """How often a station breaks down, and for how long.
+
+    ``mtbf`` is measured in **operating** seconds, not calendar seconds: the
+    clock that counts down to the next failure only runs while the station is
+    working on a board. A machine standing idle does not wear out. See the
+    README for what to change if calendar-time failures are wanted instead.
+    """
+
+    mtbf: float
+    mttr: float
+    mttr_cv: float = 0.4
+
+    def __post_init__(self) -> None:
+        if self.mtbf <= 0:
+            raise ValueError("mtbf must be positive")
+        if self.mttr <= 0:
+            raise ValueError("mttr must be positive")
+        if self.mttr_cv <= 0:
+            raise ValueError("mttr_cv must be positive")
+
+    @property
+    def time_to_failure(self) -> Distribution:
+        """Exponential: a machine is no likelier to fail for having run a while."""
+        return Exponential(mean=self.mtbf)
+
+    @property
+    def repair_time(self) -> Distribution:
+        """Lognormal: most repairs are quick, a few drag on."""
+        return LogNormal(mean=self.mttr, cv=self.mttr_cv)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"mtbf": self.mtbf, "mttr": self.mttr, "mttr_cv": self.mttr_cv}
+
+
+@dataclass(frozen=True, slots=True)
 class StationConfig:
     """One machine in the line.
 
     ``capacity`` is the number of boards the station can hold at once: 1 for the
-    single-board machines, more for the reflow oven tunnel.
+    single-board machines, more for the reflow oven tunnel. ``failures`` is
+    optional; a station without it never breaks down.
     """
 
     name: str
     service_time: Distribution
     capacity: int = 1
+    failures: FailureConfig | None = None
 
     def __post_init__(self) -> None:
         if not self.name:
@@ -136,11 +192,14 @@ class StationConfig:
             raise ValueError(f"station {self.name!r} capacity must be >= 1")
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        record: dict[str, Any] = {
             "name": self.name,
             "capacity": self.capacity,
             "service_time": self.service_time.to_dict(),
         }
+        if self.failures is not None:
+            record["failures"] = self.failures.to_dict()
+        return record
 
 
 @dataclass(frozen=True, slots=True)
@@ -166,12 +225,6 @@ class LineConfig:
     arrivals: ArrivalConfig
     stations: tuple[StationConfig, ...]
     seed: int = 42
-
-    # --- EXTENSION POINT: machine breakdowns -------------------------------
-    # Stage 2 adds a `failures: FailureConfig | None` field here, giving each
-    # station an MTBF/MTTR pair. The station process gains a preemptive repair
-    # process; nothing else in this module changes. See README "Roadmap".
-    # ----------------------------------------------------------------------
 
     def __post_init__(self) -> None:
         if not self.stations:
@@ -241,6 +294,7 @@ def line_config_from_dict(data: dict[str, Any]) -> LineConfig:
             name=spec["name"],
             service_time=distribution_from_dict(spec["service_time"]),
             capacity=int(spec.get("capacity", 1)),
+            failures=failure_config_from_dict(spec.get("failures")),
         )
         for spec in stations_spec
     )
@@ -250,6 +304,16 @@ def line_config_from_dict(data: dict[str, Any]) -> LineConfig:
         stations=stations,
         seed=int(data.get("seed", DEFAULT_LINE.seed)),
     )
+
+
+def failure_config_from_dict(spec: dict[str, Any] | None) -> FailureConfig | None:
+    """Build a :class:`FailureConfig`, or ``None`` for a station that never fails."""
+    if spec is None:
+        return None
+    try:
+        return FailureConfig(**spec)
+    except TypeError as exc:
+        raise ValueError(f"invalid failures block: {exc}") from None
 
 
 def _parse_yaml(text: str) -> dict[str, Any]:

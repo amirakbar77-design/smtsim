@@ -52,10 +52,15 @@ class Line:
     def run(
         self,
         until: float,
+        warmup: float = 0.0,
         on_progress: ProgressHook | None = None,
         progress_interval: float = DEFAULT_PROGRESS_INTERVAL,
     ) -> None:
         """Simulate ``until`` seconds of line time.
+
+        ``warmup`` does not change the simulation at all; it is recorded in the
+        log so that whoever reads it later knows which opening stretch the
+        analyst intended to discard. Excluding it is `stats.summarise`'s job.
 
         ``on_progress`` is called with the current simulation time roughly every
         ``progress_interval`` seconds of simulated time. It draws no random
@@ -64,6 +69,8 @@ class Line:
         """
         if until <= 0:
             raise ValueError("simulation horizon must be positive")
+        if not 0.0 <= warmup < until:
+            raise ValueError("warmup must be non-negative and shorter than the horizon")
 
         self.sink.emit(
             Event(
@@ -71,11 +78,15 @@ class Line:
                 EventType.RUN_STARTED,
                 detail={
                     "horizon_seconds": until,
+                    "warmup_seconds": warmup,
                     "seed": self.config.seed,
                     "line": self.config.to_dict(),
                 },
             )
         )
+
+        for station in self.stations:
+            station.start(self.env, self.sink)
 
         self.env.process(self._source())
         if on_progress is not None:
@@ -132,6 +143,7 @@ def simulate(
     config: LineConfig = DEFAULT_LINE,
     sink: EventSink | None = None,
     seed: int | None = None,
+    warmup_seconds: float = 0.0,
     on_progress: ProgressHook | None = None,
     progress_interval: float = DEFAULT_PROGRESS_INTERVAL,
 ) -> Line:
@@ -139,5 +151,10 @@ def simulate(
     if seed is not None:
         config = config.with_seed(seed)
     line = Line.build(config, sink)
-    line.run(horizon_seconds, on_progress=on_progress, progress_interval=progress_interval)
+    line.run(
+        horizon_seconds,
+        warmup=warmup_seconds,
+        on_progress=on_progress,
+        progress_interval=progress_interval,
+    )
     return line

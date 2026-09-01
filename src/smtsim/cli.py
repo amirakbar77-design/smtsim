@@ -58,10 +58,22 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="line configuration file (.toml, .json, or .yaml with the 'yaml' extra)",
     )
+    run.add_argument(
+        "--warmup",
+        type=float,
+        default=0.0,
+        help="minutes to exclude from the metrics while the line fills (default: 0)",
+    )
     run.add_argument("--quiet", action="store_true", help="suppress the progress display")
 
     stats = subcommands.add_parser("stats", help="summarise a saved event log")
     stats.add_argument("log", type=Path, help="path to a JSONL event log")
+    stats.add_argument(
+        "--warmup",
+        type=float,
+        default=None,
+        help="minutes to exclude from the metrics (default: whatever the log was run with)",
+    )
 
     return parser
 
@@ -78,14 +90,17 @@ def render_summary(console: Console, stats: LineStats) -> None:
     line_table.add_row("p95 cycle time", f"{stats.p95_cycle_time_minutes:.2f} min")
     line_table.add_row("boards arrived", f"{stats.boards_arrived}")
     line_table.add_row("still in system", f"{stats.boards_in_system}")
+    if stats.warmup_seconds > 0:
+        line_table.add_row("warm-up discarded", f"{stats.warmup_minutes:.0f} min")
     if stats.seed is not None:
         line_table.add_row("seed", f"{stats.seed}")
 
     station_table = Table(title="Stations")
     station_table.add_column("station", style="cyan", no_wrap=True)
     station_table.add_column("cap", justify="right")
-    station_table.add_column("utilisation", justify="right")
-    station_table.add_column("max queue", justify="right")
+    station_table.add_column("util", justify="right")
+    station_table.add_column("util (up)", justify="right")
+    station_table.add_column("max q", justify="right")
     station_table.add_column("wait", justify="right")
     station_table.add_column("service", justify="right")
 
@@ -98,6 +113,7 @@ def render_summary(console: Console, stats: LineStats) -> None:
             label,
             f"{station.capacity}",
             f"{station.utilisation:.1%}",
+            f"{station.utilisation_uptime:.1%}",
             f"{station.max_queue_length}",
             f"{station.mean_wait_seconds:.1f} s",
             f"{station.mean_service_seconds:.1f} s",
@@ -106,11 +122,47 @@ def render_summary(console: Console, stats: LineStats) -> None:
 
     console.print(line_table)
     console.print(station_table)
+    console.print(
+        "[dim]util: busy \u00f7 (capacity \u00d7 measured time).  "
+        "util (up): busy \u00f7 (capacity \u00d7 time not under repair).[/dim]"
+    )
+
+    if stats.has_failures:
+        console.print(render_reliability(stats))
+
     if bottleneck is not None:
         console.print(
             f"[dim]Bottleneck: [/dim][bold red]{bottleneck.name}[/bold red]"
-            f"[dim] at {bottleneck.utilisation:.1%} utilisation.[/dim]"
+            f"[dim] at {bottleneck.utilisation:.1%} utilisation of the clock.[/dim]"
         )
+
+
+def render_reliability(stats: LineStats) -> Table:
+    """Per-station breakdown metrics, shown only when something broke down."""
+    table = Table(title="Reliability")
+    table.add_column("station", style="cyan", no_wrap=True)
+    table.add_column("avail", justify="right")
+    table.add_column("fails", justify="right")
+    table.add_column("downtime", justify="right")
+    table.add_column("MTBF obs", justify="right")
+    table.add_column("MTTR obs", justify="right")
+
+    for station in stats.stations:
+        if not station.can_fail:
+            continue
+        table.add_row(
+            station.name,
+            f"{station.availability:.1%}",
+            f"{station.failures}",
+            f"{station.downtime_seconds / SECONDS_PER_MINUTE:.1f} min",
+            _optional_minutes(station.observed_mtbf_seconds),
+            _optional_minutes(station.observed_mttr_seconds),
+        )
+    return table
+
+
+def _optional_minutes(seconds: float | None) -> str:
+    return "-" if seconds is None else f"{seconds / SECONDS_PER_MINUTE:.1f} min"
 
 
 def load_config(path: Path | None) -> LineConfig:
@@ -122,13 +174,18 @@ def command_run(args: argparse.Namespace, console: Console) -> int:
         console.print("[red]--minutes must be positive[/red]")
         return 2
 
+    if args.warmup < 0 or args.warmup >= args.minutes:
+        console.print("[red]--warmup must be non-negative and shorter than --minutes[/red]")
+        return 2
+
     config = load_config(args.config).with_seed(args.seed)
     horizon = args.minutes * SECONDS_PER_MINUTE
+    warmup = args.warmup * SECONDS_PER_MINUTE
 
     with open_jsonl(args.out) as sink:
         line = Line.build(config, sink)
         if args.quiet:
-            line.run(horizon)
+            line.run(horizon, warmup=warmup)
         else:
             columns = (
                 TextColumn("[bold blue]{task.description}"),
@@ -151,7 +208,7 @@ def command_run(args: argparse.Namespace, console: Console) -> int:
                         clock=f"{now / SECONDS_PER_MINUTE:.0f} / {args.minutes:.0f} min",
                     )
 
-                line.run(horizon, on_progress=on_progress)
+                line.run(horizon, warmup=warmup, on_progress=on_progress)
 
     console.print(f"[dim]Wrote event log to[/dim] {args.out}")
     render_summary(console, summarise(read_jsonl(args.out)))
@@ -162,7 +219,8 @@ def command_stats(args: argparse.Namespace, console: Console) -> int:
     if not args.log.exists():
         console.print(f"[red]no such event log:[/red] {args.log}")
         return 1
-    render_summary(console, summarise(read_jsonl(args.log)))
+    warmup = None if args.warmup is None else args.warmup * SECONDS_PER_MINUTE
+    render_summary(console, summarise(read_jsonl(args.log), warmup_seconds=warmup))
     return 0
 
 
