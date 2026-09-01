@@ -134,33 +134,36 @@ def render_summary(console: Console, stats: LineStats) -> None:
     station_table = Table(title="Stations")
     station_table.add_column("station", style="cyan", no_wrap=True)
     station_table.add_column("cap", justify="right")
-    station_table.add_column("util", justify="right")
-    station_table.add_column("util (up)", justify="right")
+    station_table.add_column("work", justify="right")
+    station_table.add_column("block", justify="right")
+    station_table.add_column("starve", justify="right")
+    station_table.add_column("down", justify="right")
     station_table.add_column("max q", justify="right")
     station_table.add_column("wait", justify="right")
-    station_table.add_column("service", justify="right")
 
     bottleneck = stats.bottleneck
     for station in stats.stations:
         is_bottleneck = bottleneck is not None and station.name == bottleneck.name
         style = "bold red" if is_bottleneck else None
-        label = f"{station.name} ←" if is_bottleneck else station.name
+        label = f"{station.name} \u2190" if is_bottleneck else station.name
         station_table.add_row(
             label,
             f"{station.capacity}",
-            f"{station.utilisation:.1%}",
-            f"{station.utilisation_uptime:.1%}",
+            f"{station.working_fraction:.1%}",
+            f"{station.blocked_fraction:.1%}",
+            f"{station.starved_fraction:.1%}",
+            f"{station.down_fraction:.1%}",
             f"{station.max_queue_length}",
             f"{station.mean_wait_seconds:.1f} s",
-            f"{station.mean_service_seconds:.1f} s",
             style=style,
         )
 
     console.print(line_table)
     console.print(station_table)
     console.print(
-        "[dim]util: busy \u00f7 (capacity \u00d7 measured time).  "
-        "util (up): busy \u00f7 (capacity \u00d7 time not under repair).[/dim]"
+        "[dim]work / block / starve / down partition each station's capacity over the "
+        "measured window and sum to 100%.  block: finished a board with nowhere to put "
+        "it.  starve: free capacity with no board to work on.[/dim]"
     )
 
     if stats.has_failures:
@@ -169,7 +172,7 @@ def render_summary(console: Console, stats: LineStats) -> None:
     if bottleneck is not None:
         console.print(
             f"[dim]Bottleneck: [/dim][bold red]{bottleneck.name}[/bold red]"
-            f"[dim] at {bottleneck.utilisation:.1%} utilisation of the clock.[/dim]"
+            f"[dim] at {bottleneck.utilisation:.1%} of the clock spent producing.[/dim]"
         )
 
 
@@ -178,8 +181,8 @@ def render_reliability(stats: LineStats) -> Table:
     table = Table(title="Reliability")
     table.add_column("station", style="cyan", no_wrap=True)
     table.add_column("avail", justify="right")
+    table.add_column("util (up)", justify="right")
     table.add_column("fails", justify="right")
-    table.add_column("downtime", justify="right")
     table.add_column("MTBF obs", justify="right")
     table.add_column("MTTR obs", justify="right")
 
@@ -189,8 +192,8 @@ def render_reliability(stats: LineStats) -> Table:
         table.add_row(
             station.name,
             f"{station.availability:.1%}",
+            f"{station.utilisation_uptime:.1%}",
             f"{station.failures}",
-            f"{station.downtime_seconds / SECONDS_PER_MINUTE:.1f} min",
             _optional_minutes(station.observed_mtbf_seconds),
             _optional_minutes(station.observed_mttr_seconds),
         )

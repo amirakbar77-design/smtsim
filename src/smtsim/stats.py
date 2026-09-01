@@ -43,13 +43,23 @@ def _overlap(start: float, end: float, window_start: float, window_end: float) -
 
 @dataclass(frozen=True, slots=True)
 class StationStats:
-    """Per-station metrics over the measurement window."""
+    """Per-station metrics over the measurement window.
+
+    The four time accounts -- working, blocked, starved, down -- partition the
+    window exactly, per unit of capacity. Every slot-second of the measured
+    window is in one of them and none is in two, so the four fractions sum to
+    one. That identity is the sharpest structural check on the model: it holds
+    only if the number of boards physically inside the station always equals
+    the number being worked on plus the number stuck waiting to leave.
+    """
 
     name: str
     capacity: int
-    utilisation: float
-    utilisation_uptime: float
-    availability: float
+    measured_slot_seconds: float
+    working_slot_seconds: float
+    blocked_slot_seconds: float
+    starved_slot_seconds: float
+    down_slot_seconds: float
     boards_started: int
     boards_finished: int
     max_queue_length: int
@@ -61,8 +71,69 @@ class StationStats:
     observed_mttr_seconds: float | None
 
     @property
+    def uptime_slot_seconds(self) -> float:
+        return max(0.0, self.measured_slot_seconds - self.down_slot_seconds)
+
+    def _fraction(self, slot_seconds: float) -> float:
+        if self.measured_slot_seconds <= 0:
+            return 0.0
+        return slot_seconds / self.measured_slot_seconds
+
+    @property
+    def working_fraction(self) -> float:
+        """Producing: a board under the head, being worked on."""
+        return self._fraction(self.working_slot_seconds)
+
+    @property
+    def blocked_fraction(self) -> float:
+        """Finished a board and holding it, because downstream has no room."""
+        return self._fraction(self.blocked_slot_seconds)
+
+    @property
+    def starved_fraction(self) -> float:
+        """Free capacity with no board in it to work on."""
+        return self._fraction(self.starved_slot_seconds)
+
+    @property
+    def down_fraction(self) -> float:
+        """Under repair. The whole station, however many slots it has."""
+        return self._fraction(self.down_slot_seconds)
+
+    @property
+    def accounted_slot_seconds(self) -> float:
+        """The four accounts summed. Must equal ``measured_slot_seconds``."""
+        return (
+            self.working_slot_seconds
+            + self.blocked_slot_seconds
+            + self.starved_slot_seconds
+            + self.down_slot_seconds
+        )
+
+    @property
+    def utilisation(self) -> float:
+        """Busy against the clock. The same thing as the working fraction."""
+        return self.working_fraction
+
+    @property
+    def utilisation_uptime(self) -> float:
+        """Busy against the time the station was not under repair."""
+        if self.uptime_slot_seconds <= 0:
+            return 0.0
+        return self.working_slot_seconds / self.uptime_slot_seconds
+
+    @property
+    def availability(self) -> float:
+        if self.measured_slot_seconds <= 0:
+            return 1.0
+        return self.uptime_slot_seconds / self.measured_slot_seconds
+
+    @property
     def can_fail(self) -> bool:
         return self.failures > 0 or self.downtime_seconds > 0.0
+
+    @property
+    def can_block(self) -> bool:
+        return self.blocked_slot_seconds > 0.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -127,12 +198,16 @@ class _StationAccumulator:
     capacity: int = 1
 
     working: int = 0
+    blocked: int = 0
+    occupied: int = 0
     queue_length: int = 0
     failed: bool = False
     failed_since: float | None = None
     last_time: float = 0.0
 
-    busy_slot_seconds: float = 0.0
+    working_slot_seconds: float = 0.0
+    blocked_slot_seconds: float = 0.0
+    starved_slot_seconds: float = 0.0
     operating_seconds: float = 0.0
     downtime_seconds: float = 0.0
 
@@ -151,14 +226,24 @@ class _StationAccumulator:
     worked_seconds: dict[int, float] = field(default_factory=dict)
 
     def advance(self, to: float, window_start: float, window_end: float) -> None:
-        """Integrate the time-weighted quantities up to ``to``."""
+        """Integrate the time-weighted quantities up to ``to``.
+
+        A station under repair contributes its whole capacity to downtime: the
+        machine is unavailable however many boards happen to be sitting in it.
+        Otherwise each slot is working, blocked, or empty, and ``occupied`` is
+        tracked from its own events rather than inferred from the other two --
+        which is what gives the four-way identity something to catch.
+        """
         span = _overlap(self.last_time, to, window_start, window_end)
         if span > 0.0:
-            self.busy_slot_seconds += self.working * span
-            if self.working > 0:
-                self.operating_seconds += span
             if self.failed:
                 self.downtime_seconds += span
+            else:
+                self.working_slot_seconds += self.working * span
+                self.blocked_slot_seconds += self.blocked * span
+                self.starved_slot_seconds += (self.capacity - self.occupied) * span
+                if self.working > 0:
+                    self.operating_seconds += span
             self.max_queue_length = max(self.max_queue_length, self.queue_length)
         self.last_time = max(self.last_time, to)
 
@@ -236,6 +321,7 @@ def summarise(events: Iterable[Event], warmup_seconds: float | None = None) -> L
                 station.advance(event.time, warmup, horizon_seconds or last_time)
                 station.queue_length = max(0, station.queue_length - 1)
                 station.working += 1
+                station.occupied += 1
                 if in_window:
                     station.boards_started += 1
                 if event.board_id is not None:
@@ -270,6 +356,7 @@ def summarise(events: Iterable[Event], warmup_seconds: float | None = None) -> L
                 station = accumulator(event.station or "")
                 station.advance(event.time, warmup, horizon_seconds or last_time)
                 station.working = max(0, station.working - 1)
+                station.occupied = max(0, station.occupied - 1)
                 if in_window:
                     station.boards_finished += 1
                 if event.board_id is not None:
@@ -280,6 +367,18 @@ def summarise(events: Iterable[Event], warmup_seconds: float | None = None) -> L
                         if in_window:
                             station.service_seconds += worked
                             station.services_counted += 1
+
+            case EventType.TRANSFER_BLOCKED:
+                station = accumulator(event.station or "")
+                station.advance(event.time, warmup, horizon_seconds or last_time)
+                station.blocked += 1
+                station.occupied += 1
+
+            case EventType.TRANSFER_UNBLOCKED:
+                station = accumulator(event.station or "")
+                station.advance(event.time, warmup, horizon_seconds or last_time)
+                station.blocked = max(0, station.blocked - 1)
+                station.occupied = max(0, station.occupied - 1)
 
             case EventType.STATION_FAILED:
                 station = accumulator(event.station or "")
@@ -343,18 +442,16 @@ def summarise(events: Iterable[Event], warmup_seconds: float | None = None) -> L
 
 
 def _finish_station(station: _StationAccumulator, window_seconds: float) -> StationStats:
-    uptime_seconds = max(0.0, window_seconds - station.downtime_seconds)
-    slot_seconds = window_seconds * station.capacity
-    uptime_slot_seconds = uptime_seconds * station.capacity
+    measured_slot_seconds = window_seconds * station.capacity
 
     return StationStats(
         name=station.name,
         capacity=station.capacity,
-        utilisation=(station.busy_slot_seconds / slot_seconds if slot_seconds > 0 else 0.0),
-        utilisation_uptime=(
-            station.busy_slot_seconds / uptime_slot_seconds if uptime_slot_seconds > 0 else 0.0
-        ),
-        availability=(uptime_seconds / window_seconds if window_seconds > 0 else 1.0),
+        measured_slot_seconds=measured_slot_seconds,
+        working_slot_seconds=station.working_slot_seconds,
+        blocked_slot_seconds=station.blocked_slot_seconds,
+        starved_slot_seconds=station.starved_slot_seconds,
+        down_slot_seconds=station.downtime_seconds * station.capacity,
         boards_started=station.boards_started,
         boards_finished=station.boards_finished,
         max_queue_length=station.max_queue_length,

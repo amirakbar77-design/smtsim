@@ -14,9 +14,10 @@ Set Padding 24
 Set Theme "Catppuccin Mocha"
 Set TypingSpeed 30ms
 
-# Is a second placement head worth buying? Sixty shifts, paired by seed.
+# Are longer conveyors worth it? Sixty shifts, paired by seed. The effect is
+# small enough that no single shift could resolve it.
 Sleep 1s
-Type "smtsim compare configs/baseline.toml configs/two_placers.toml --seeds 30 --minutes 480 --warmup 30"
+Type "smtsim compare configs/tight_buffers.toml configs/baseline.toml --seeds 30 --minutes 480 --warmup 30"
 Sleep 500ms
 Enter
 Sleep 10s

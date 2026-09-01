@@ -14,6 +14,7 @@ kind = "lognormal"
 mean = 57.0
 cv = 0.45
 
+# Buffers as in the baseline: the only difference is the placer's capacity.
 [[stations]]
 name = "solder_paste_printer"
 capacity = 1
@@ -29,6 +30,7 @@ mttr_cv = 0.5
 
 [[stations]]
 name = "pick_and_place"
+input_buffer = 3
 capacity = 2
 [stations.service_time]
 kind = "lognormal"
@@ -42,6 +44,7 @@ mttr_cv = 0.6
 
 [[stations]]
 name = "spi"
+input_buffer = 3
 capacity = 1
 [stations.service_time]
 kind = "triangular"
@@ -52,6 +55,7 @@ high = 26.0
 
 [[stations]]
 name = "reflow_oven"
+input_buffer = 3
 capacity = 6
 [stations.service_time]
 kind = "constant"

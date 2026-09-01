@@ -26,6 +26,8 @@ class EventType(StrEnum):
     SERVICE_INTERRUPTED = "service_interrupted"
     SERVICE_RESUMED = "service_resumed"
     SERVICE_FINISHED = "service_finished"
+    TRANSFER_BLOCKED = "transfer_blocked"
+    TRANSFER_UNBLOCKED = "transfer_unblocked"
     BOARD_COMPLETED = "board_completed"
     STATION_FAILED = "station_failed"
     STATION_REPAIRED = "station_repaired"

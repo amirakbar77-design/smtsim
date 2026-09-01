@@ -223,14 +223,27 @@ def test_the_compare_command_writes_json_and_prints_a_summary(tmp_path: Path, ca
     assert all("excludes_zero" in metric["interval"] for metric in payload["metrics"])
 
 
-def test_the_output_never_claims_commercial_significance(tmp_path: Path, capsys) -> None:
+def test_a_separated_result_still_disclaims_commercial_significance(capsys) -> None:
     """The wording matters: statistical separation is not business value."""
     main(
-        ["compare", str(BASELINE), str(TWO_PLACERS), "--seeds", "5", "--minutes", "120", "--quiet"]
+        ["compare", str(BASELINE), str(TWO_PLACERS), "--seeds", "12", "--minutes", "480",
+         "--warmup", "30", "--quiet"]
     )
     captured = capsys.readouterr().out
 
-    assert "not" in captured and "worth paying for" in captured
+    assert "clear of zero" in captured
+    assert "worth paying for" in captured
+
+
+def test_an_unseparated_result_is_not_reported_as_no_difference(capsys) -> None:
+    """Spanning zero means these runs did not separate them, not that they match."""
+    main(
+        ["compare", str(BASELINE), str(BASELINE), "--seeds", "5", "--minutes", "120", "--quiet"]
+    )
+    captured = capsys.readouterr().out
+
+    assert "spans zero" in captured
+    assert "not evidence they are the same" in captured
 
 
 def test_verbose_shows_the_per_seed_table(tmp_path: Path, capsys) -> None:

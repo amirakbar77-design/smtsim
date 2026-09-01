@@ -118,11 +118,19 @@ class Line:
             self.env.process(self._board(self.boards_arrived))
 
     def _board(self, board_id: int) -> Generator[simpy.Event, None, None]:
-        """Walk one board through every station in order."""
+        """Walk one board through every station in order.
+
+        The board carries its buffer slot from one station to the next: a
+        station hands the board into the downstream conveyor before letting go
+        of its own machine, which is what makes a full conveyor block the
+        machine behind it.
+        """
         self.sink.emit(Event(self.env.now, EventType.BOARD_ARRIVED, board_id))
 
-        for station in self.stations:
-            yield from station.visit(self.env, board_id, self.sink)
+        slot = yield from self.stations[0].enter_queue(self.env, board_id, self.sink, None)
+        for index, station in enumerate(self.stations):
+            downstream = self.stations[index + 1] if index + 1 < len(self.stations) else None
+            slot = yield from station.visit(self.env, board_id, self.sink, slot, downstream)
 
         self.boards_completed += 1
         self.sink.emit(Event(self.env.now, EventType.BOARD_COMPLETED, board_id))

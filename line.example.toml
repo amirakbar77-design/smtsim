@@ -18,6 +18,15 @@ mean = 57.0
 cv = 0.45
 # limit = 500   # stop feeding after this many boards; omit for a continuous feed
 
+# input_buffer is the length of the conveyor feeding a station, in boards. A
+# board holds a slot on it from the moment it joins the queue until the machine
+# lifts it off, so a station's total work-in-progress is input_buffer + capacity.
+# Omit it for an unbounded buffer, which is what the printer gets here: it is
+# fed from a magazine of bare boards rather than from a conveyor.
+#
+# When a conveyor fills, the machine behind it finishes its board and then
+# cannot put it down: it BLOCKS. When one empties, the machine in front of it
+# STARVES. The last station never blocks -- its boards leave the line.
 [[stations]]
 name = "solder_paste_printer"
 capacity = 1
@@ -28,6 +37,7 @@ cv = 0.15
 
 [[stations]]
 name = "pick_and_place"
+input_buffer = 3
 capacity = 1
 [stations.service_time]
 kind = "lognormal"
@@ -45,6 +55,7 @@ cv = 0.20
 
 [[stations]]
 name = "spi"
+input_buffer = 3
 capacity = 1
 [stations.service_time]
 kind = "triangular"
@@ -54,6 +65,7 @@ high = 26.0
 
 [[stations]]
 name = "reflow_oven"
+input_buffer = 3
 capacity = 6
 [stations.service_time]
 kind = "constant"

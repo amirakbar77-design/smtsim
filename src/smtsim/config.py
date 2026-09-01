@@ -178,18 +178,30 @@ class StationConfig:
     ``capacity`` is the number of boards the station can hold at once: 1 for the
     single-board machines, more for the reflow oven tunnel. ``failures`` is
     optional; a station without it never breaks down.
+
+    ``input_buffer`` is the length of the conveyor feeding this station, in
+    boards. A board occupies a buffer slot from the moment it joins the queue
+    until the moment the machine starts work on it -- it is lifted off the
+    conveyor and into the machine -- so a station can hold ``capacity`` boards
+    on top of the ``input_buffer`` waiting for it. ``None`` means unbounded,
+    which reproduces the behaviour of a line with no buffer modelling at all.
     """
 
     name: str
     service_time: Distribution
     capacity: int = 1
     failures: FailureConfig | None = None
+    input_buffer: int | None = None
 
     def __post_init__(self) -> None:
         if not self.name:
             raise ValueError("station name must not be empty")
         if self.capacity < 1:
             raise ValueError(f"station {self.name!r} capacity must be >= 1")
+        if self.input_buffer is not None and self.input_buffer < 1:
+            raise ValueError(
+                f"station {self.name!r} input_buffer must be >= 1, or omitted for unbounded"
+            )
 
     def to_dict(self) -> dict[str, Any]:
         record: dict[str, Any] = {
@@ -199,6 +211,8 @@ class StationConfig:
         }
         if self.failures is not None:
             record["failures"] = self.failures.to_dict()
+        if self.input_buffer is not None:
+            record["input_buffer"] = self.input_buffer
         return record
 
 
@@ -295,6 +309,9 @@ def line_config_from_dict(data: dict[str, Any]) -> LineConfig:
             service_time=distribution_from_dict(spec["service_time"]),
             capacity=int(spec.get("capacity", 1)),
             failures=failure_config_from_dict(spec.get("failures")),
+            input_buffer=(
+                None if spec.get("input_buffer") is None else int(spec["input_buffer"])
+            ),
         )
         for spec in stations_spec
     )

@@ -13,7 +13,7 @@ from smtsim.line import Line, simulate
 from smtsim.rng import RngStreams
 from smtsim.stats import LineStats, PairedInterval, StationStats, paired_interval, summarise
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 
 __all__ = [
     "DEFAULT_LINE",

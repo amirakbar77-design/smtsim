@@ -1,15 +1,16 @@
 # The stage 2 baseline: the default line with realistic breakdowns.
 #
-# Two what-ifs use this as their "before" side:
+# The same line with one-board conveyors instead of three-board ones. This is
+# the cheapest what-if in the repository -- it costs a length of conveyor, not a
+# machine -- and it is the clearest demonstration of coupling: shortening the
+# buffers changes nothing about any machine, yet the line produces less.
 #
-#   smtsim compare configs/baseline.toml configs/two_placers.toml \
-#       --seeds 30 --minutes 480 --warmup 30
 #   smtsim compare configs/tight_buffers.toml configs/baseline.toml \
 #       --seeds 30 --minutes 480 --warmup 30
 #
 # `line.example.toml` in the repository root documents every available option.
 
-name = "SMT line 1"
+name = "SMT line 1 (tight buffers)"
 seed = 42
 
 [arrivals.interarrival]
@@ -17,11 +18,8 @@ kind = "lognormal"
 mean = 57.0
 cv = 0.45
 
-# The printer is fed from a magazine of bare boards, not from a conveyor, so
-# its input is left unbounded: raw material waiting to be loaded is not the
-# constraint this model is about. Every other station has a real conveyor in
-# front of it, three boards long, and when one fills the machine behind it
-# blocks.
+# As in the baseline, the printer is fed from a magazine and its input is
+# unbounded. The conveyors between the machines hold one board each.
 [[stations]]
 name = "solder_paste_printer"
 capacity = 1
@@ -37,7 +35,7 @@ mttr_cv = 0.5
 
 [[stations]]
 name = "pick_and_place"
-input_buffer = 3
+input_buffer = 1
 capacity = 1
 [stations.service_time]
 kind = "lognormal"
@@ -51,7 +49,7 @@ mttr_cv = 0.6
 
 [[stations]]
 name = "spi"
-input_buffer = 3
+input_buffer = 1
 capacity = 1
 [stations.service_time]
 kind = "triangular"
@@ -62,7 +60,7 @@ high = 26.0
 
 [[stations]]
 name = "reflow_oven"
-input_buffer = 3
+input_buffer = 1
 capacity = 6
 [stations.service_time]
 kind = "constant"

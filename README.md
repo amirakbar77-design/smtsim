@@ -9,8 +9,9 @@ worked on* — without needing the real line.
 
 ![smtsim demo](demo/demo.gif)
 
-Stage 2 adds machine breakdowns and a paired what-if comparison, which is what
-the line was built to answer: *is a second placement head worth buying?*
+Stage 2 adds machine breakdowns and a paired what-if comparison. Stage 2b adds
+the conveyors between the machines, which is what turns four independent
+machines into a line: when one stops, its neighbours find out.
 
 ![smtsim compare](demo/compare.gif)
 
@@ -18,13 +19,14 @@ the line was built to answer: *is a second placement head worth buying?*
 
 ```
               ┌──────────┐   ┌──────────┐   ┌──────────┐   ┌──────────┐
-  boards ───▶ │  solder  │──▶│  pick &  │──▶│   SPI    │──▶│  reflow  │──▶ done
+  boards ───▶ │  solder  │─▷─│  pick &  │─▷─│   SPI    │─▷─│  reflow  │──▶ done
               │  paste   │   │  place   │   │  paste   │   │   oven   │
               │ printer  │   │          │   │ inspect  │   │ (tunnel) │
               └──────────┘   └──────────┘   └──────────┘   └──────────┘
    capacity        1              1              1              6
    cycle time    ~25 s          ~52 s          ~19 s          240 s
    MTBF / MTTR  120 / 4 min    90 / 7 min       never        480 / 15 min
+                          ▷ = a 3-board conveyor
 ```
 
 The first three stations hold one board at a time. The reflow oven is a
@@ -36,9 +38,34 @@ in slightly faster than it can clear them. Nothing in the code says "form a
 queue" — the queue in front of the placer is simply what happens when work
 arrives faster than a machine can absorb it.
 
-The MTBF row is stage 2. `configs/baseline.toml` is the line above with
-breakdowns; the built-in default line has none, so a config written for stage 1
-still runs unchanged.
+Between the machines are short conveyors, three boards long. They are the reason
+the machines are not independent, and stage 2b is about what that costs.
+
+### What blocking and starving mean
+
+Put a machine between two short conveyors and it can fail to produce for two
+quite different reasons that have nothing to do with the machine itself.
+
+**Starving** is having nothing to work on. The conveyor feeding the machine is
+empty, so it stands idle waiting for the machine before it. Boards are late
+arriving.
+
+**Blocking** is having nowhere to put what you have finished. The machine has
+completed a board, but the conveyor in front of the *next* machine is full, so
+it cannot let go. It sits holding the finished board, doing nothing, until a
+space opens up. Boards are late leaving.
+
+Neither is a fault. Both are what a coupled line does, and together with
+breakdowns they are why a line of four machines never runs at the speed of its
+slowest machine. On the baseline line the printer spends 43% of a shift
+producing, 37% starved waiting for boards, 18% blocked behind a busy placer, and
+2% under repair. Only the first of those is work.
+
+A machine that breaks down now takes its neighbours with it: the station behind
+it blocks within a couple of minutes, and the station in front of it runs dry.
+That is the whole point of modelling buffers, and there is a test that asserts
+exactly that behaviour, because it is the clearest possible demonstration that
+the line is coupled at all.
 
 ### The baseline is deliberately run close to its limit
 
@@ -48,12 +75,13 @@ Boards arrive every 57 s. The line is therefore loaded to about **98% of the
 placer's effective capacity** — stable, but only just.
 
 That is not an accident and it is not a mistake. It is where interesting SMT
-lines actually sit, and it is what makes the stage 2 question worth asking. It
+lines actually sit, and it is what makes the what-if questions worth asking. It
 does have two consequences that shape how the results must be read:
 
 - **Single runs are nearly worthless.** Across 30 seeds the baseline's mean cycle
-  time runs from 8.8 to 23.4 minutes. Any one shift tells you almost nothing,
-  which is exactly why `smtsim compare` exists and why it runs 30 seeds a side.
+  time runs from about 9 to about 26 minutes. Any one shift tells you almost
+  nothing, which is exactly why `smtsim compare` exists and why it runs 30 seeds
+  a side.
 - **Cycle time has not settled by the end of a shift.** At this loading the queue
   is still finding its level after eight hours, so "mean cycle time" means *over
   an eight-hour shift starting from an empty line*, not a steady-state figure. A
@@ -62,19 +90,26 @@ does have two consequences that shape how the results must be read:
   arrival rate, is far better behaved.
 
 One shift on the baseline line (seed 42, first 30 minutes discarded) — a mild
-seed, chosen for the demo because everything fits on one screen:
+seed, chosen for the demo because everything fits on one screen. 472 boards,
+62.9 boards/hour, mean cycle time 7.88 min, p95 11.37 min:
 
-| station | cap | util | util (up) | max queue | mean wait |
-|---|---|---|---|---|---|
-| solder_paste_printer | 1 | 43.1 % | 43.9 % | 5 | 4.3 s |
-| **pick_and_place** | 1 | **88.8 %** | **92.6 %** | **8** | **118.5 s** |
-| spi | 1 | 33.5 % | 33.5 % | 1 | 0.0 s |
-| reflow_oven | 6 | 69.8 % | 69.8 % | 1 | 0.0 s |
+| station | cap | work | block | starve | down | max q | mean wait |
+|---|---|---|---|---|---|---|---|
+| solder_paste_printer | 1 | 43.1 % | 17.6 % | 37.4 % | 1.9 % | 5 | 37.2 s |
+| **pick_and_place** | 1 | **88.8 %** | 0.0 % | 7.1 % | 4.1 % | **3** | **87.7 s** |
+| spi | 1 | 33.5 % | 0.0 % | 66.5 % | 0.0 % | 1 | 0.0 s |
+| reflow_oven | 6 | 69.8 % | 0.0 % | 30.2 % | 0.0 % | 1 | 0.0 s |
 
-| station | availability | failures | downtime | MTBF observed | MTTR observed |
+| station | availability | util (uptime) | failures | MTBF observed | MTTR observed |
 |---|---|---|---|---|---|
-| solder_paste_printer | 98.1 % | 2 | 8.5 min | 96.9 min | 4.3 min |
-| pick_and_place | 95.9 % | 4 | 18.4 min | 99.9 min | 6.1 min |
+| solder_paste_printer | 98.1 % | 43.9 % | 2 | 96.9 min | 4.3 min |
+| pick_and_place | 95.9 % | 92.6 % | 4 | 99.9 min | 6.1 min |
+
+Read the first table across a row and it says what a machine did with its shift.
+The placer is the only one that spends most of its time producing; the printer
+loses more time to blocking than the placer loses to breakdowns. Read it down the
+`block` column and the coupling is visible at a glance: only stations upstream of
+the bottleneck ever block, because only they can run into a full conveyor.
 
 ## Why discrete-event simulation rather than a tick loop
 
@@ -192,14 +227,36 @@ them would depend on the run's timing, so switching failures on for a station
 would silently reshuffle that station's service times too. Splitting them
 reintroduces nothing.
 
-How strong is the guarantee? Stronger than it should be, for a reason worth
-knowing. A test asserts that changing the placer leaves every one of the
-printer's timestamps identical for the *whole run* — not just an opening prefix.
-That holds because buffers between stations are unbounded, so a backed-up placer
-never blocks the printer, and the printer's behaviour is a function of arrivals
-alone. When stage 2b adds finite buffers, that assertion will have to weaken to a
-prefix of boards. That will be a sign the model got more realistic, not that the
-streams broke, and the test says so in place.
+#### How strong the guarantee is, and why it got weaker
+
+Through stage 2 this held absolutely: changing the placer left every one of the
+printer's timestamps identical for the *whole run*. That was never a sign of
+unusually good isolation. It was a symptom of the model being uncoupled —
+buffers were unbounded, so a backed-up placer could never block the printer, and
+the printer's behaviour was a function of arrivals alone.
+
+Stage 2b takes that away, on purpose. With a three-board conveyor in front of the
+placer, a slower placer eventually fills it, and from that moment the printer
+blocks and its timeline legitimately diverges. Measured across seeds, the
+earliest the printer ever notices is board 11.
+
+So the test now asserts two things instead of one:
+
+- for the first ten boards — before backpressure could possibly have propagated —
+  the printer's timestamps must be **identical**, or the streams are leaking;
+- somewhere after that they must **diverge**, or the buffers are not actually
+  coupling the line and the first assertion is proving nothing.
+
+The second half is the important one. A test that had merely been loosened until
+it passed would still pass with the streams thoroughly broken.
+
+The practical consequence for `smtsim compare` is that common random numbers now
+cancel *less* of the shared variation than they did in stage 2, because upstream
+stations are no longer bitwise identical between the two arms. The pairing itself
+is unaffected — it only requires that both arms use the same seed, which they
+still do — so the intervals remain valid. They are just a little wider than they
+would be on an uncoupled line. That is the price of a more honest model, and it
+is worth paying.
 
 ### The simulation core does no I/O, and that is the point
 
@@ -357,6 +414,172 @@ which:
   repeat-offender machine.
 - **No preventive maintenance**, and no scheduled breaks or changeovers.
 
+## Buffers, blocking and starving
+
+Each station takes an optional conveyor length:
+
+```toml
+[[stations]]
+name = "pick_and_place"
+input_buffer = 3      # the conveyor feeding this machine holds three boards
+capacity = 1
+```
+
+Omit it and the buffer is unbounded, which reproduces a line with no buffer
+modelling at all. That is not merely similar: a station with no `input_buffer`
+builds no buffer resource, makes no request and yields nowhere, so the board
+follows exactly the code path it followed before buffers existed. The pinned
+hash of the default line's board-level events does not move by a single byte,
+and there is a test asserting it from both sides.
+
+### Where a board sits, and when
+
+**A board occupies a buffer slot from the moment it joins the queue until the
+moment the machine starts work on it.** The machine lifts it off the conveyor
+and into its own nest, freeing the slot behind it.
+
+Both conventions exist in the literature; this one matches a physical conveyor
+feeding a machine, where the machine's board clamp is not part of the conveyor.
+It has two consequences worth stating plainly:
+
+- A station's total work-in-progress is `input_buffer + capacity`, not
+  `input_buffer`. A three-board conveyor in front of a single-head placer means
+  four boards at that station at most.
+- **Queue length still means what the table says it means.** The queue is the
+  conveyor, so `max q` is peak conveyor occupancy and can never exceed the
+  buffer size — there is a test asserting exactly that, for buffers of 1, 2
+  and 3. Under the other convention the queue would be capped at
+  `input_buffer - capacity`, which reads oddly and makes a buffer of 1 on a
+  single-head machine mean "no waiting room at all".
+
+The printer's input is left unbounded in `configs/`, because it is fed from a
+magazine of bare boards rather than from a conveyor. Raw material waiting to be
+loaded is not the constraint this model is about.
+
+### Blocking after service
+
+A machine finishes its board and *then* discovers whether it has anywhere to put
+it. It does not check first and decline to start.
+
+```python
+sink.emit(Event(env.now, EventType.SERVICE_FINISHED, board_id, self.name))
+
+# The machine is not free until the board it just finished has somewhere to go.
+next_slot = None
+if downstream is not None:
+    next_slot = yield from downstream.enter_queue(env, board_id, sink, self)
+```
+
+That `yield` sits *inside* the `with self.resource.request()` block, so the
+machine is still held while it waits. That is the entire mechanism. No other
+part of the model needs to know that blocking exists.
+
+The last station has no downstream, so `downstream` is `None` and it never
+blocks: completed boards leave the line, and the line always has room for one
+more finished board.
+
+### Blocking, starving and breakdowns
+
+Only half of backpressure is new in this stage, and it is worth being precise
+about which half.
+
+**Starving was already there.** With unbounded buffers a dead placer still passes
+nothing downstream, so the SPI runs dry exactly as it does now. Starvation needs
+no buffers — it is a fact about flow, and it is derivable from the existing
+`service_finished` and `service_started` events.
+
+**Blocking is what finite buffers add.** An uncoupled printer works happily into
+an infinite queue and never notices that the machine ahead of it has stopped. A
+coupled one blocks within a couple of minutes. There is a test pinning this
+distinction, so that neither half is mistaken for the other.
+
+A blocked station does not wear out. Failures accrue on operating time, and a
+station holding a finished board it cannot put down is not operating. This falls
+out of the existing mechanism rather than needing one of its own — `_end_work`
+has already run for the board being held, so the wear countdown is suspended the
+same way it is for an idle machine. That is exactly the kind of thing that
+silently works or silently does not, so it is verified rather than assumed: a
+test runs a printer that spends over 15% of the shift blocked and checks that its
+observed MTBF, measured against operating time, still matches the configured
+value to within 12%.
+
+### Why this line cannot deadlock
+
+A deadlock would need a cycle of machines each waiting on the next. There is no
+cycle here, and the reason is structural rather than lucky.
+
+Station *k* blocks only while waiting for a slot in station *k+1*'s buffer. That
+slot frees when station *k+1* starts work on a board, which needs its machine
+free, which needs its own current board to have departed — which needs a slot in
+station *k+2*. So the waits-for relation only ever points **forwards along the
+line**, from *k* to *k+1*. A relation that strictly increases an integer index
+cannot contain a cycle.
+
+The chain also terminates. Station *n*, the last one, waits on nothing: its
+boards leave the line. So station *n* always finishes and releases its machine,
+which frees a slot in buffer *n*, which unblocks station *n−1*, and so on
+backwards. Every blocked station is eventually released, by induction from the
+end of the line.
+
+Two conditions this argument leans on, both of which are enforced or true today:
+
+- **Every buffer holds at least one board.** `input_buffer` must be `>= 1`, or
+  omitted for unbounded; zero is rejected by the config validator.
+- **The routing is a simple path.** Every board visits the stations in order,
+  once each.
+
+The second is where the argument would fail. **Add a rework loop — an SPI
+failure sending a board back to the printer — and the waits-for relation stops
+being monotonic in the station index, and deadlock becomes possible.** A board
+being reworked upstream could hold a slot that a downstream station is waiting
+on, while the rework itself waits on that downstream station. If rework is ever
+added, it will need a real remedy: a dedicated rework buffer outside the main
+path, or a deadlock-avoidance rule. This is not a hypothetical worry about the
+current model, but it is a live constraint on what can be added to it.
+
+A test runs the line with one-board conveyors everywhere and breakdowns on three
+of the four stations, and asserts that boards still flow, that they are
+conserved, and that completions continue right up to the horizon.
+
+### The four time accounts
+
+Every station's capacity, over the measured window, is partitioned into exactly
+four accounts:
+
+| account | meaning |
+|---|---|
+| **work** | a board under the head, being processed |
+| **block** | finished a board, holding it, waiting for space downstream |
+| **starve** | free capacity with no board in it to work on |
+| **down** | under repair — the whole station, however many slots it has |
+
+They sum to 100% of `capacity × window`, and the station table reports all four.
+`work` is the same number that used to be called utilisation.
+
+The identity is the sharpest structural check available on this stage, but only
+because of how it is computed. If `starve` were derived as
+`window − work − block − down` the identity would be true by construction and
+would test nothing at all. Instead station **occupancy** — how many boards are
+physically inside — is tracked from its own events, and starvation is
+`capacity − occupancy`. The identity then holds only if occupancy always equals
+the number of boards being worked on plus the number stuck waiting to leave. Get
+the buffer wiring wrong and it breaks. It is asserted across four seeds and five
+configurations, with and without breakdowns.
+
+### What the log had to gain
+
+Two event types: `transfer_blocked` and `transfer_unblocked`, carrying the board
+and the station being held up.
+
+Strictly, blocked intervals *are* derivable without them, since a block runs from
+`service_finished` at station *k* to `queue_entered` at station *k+1*. They are
+recorded explicitly anyway, for a better reason: `summarise` does not know the
+line's topology. It learns which stations exist from the run header, but not
+their order, and inferring one station's metric by pairing events across two
+stations would mean teaching the stats layer the routing. Explicit events keep
+the reduction topology-agnostic, and keep it correct if routing ever stops being
+a simple path.
+
 ## Warm-up
 
 Both `run` and `stats` take `--warmup MINUTES`, which excludes an opening stretch
@@ -386,15 +609,14 @@ Some guidance:
 ## Comparing two configurations
 
 ```bash
-smtsim compare configs/baseline.toml configs/two_placers.toml \
+smtsim compare configs/tight_buffers.toml configs/baseline.toml \
     --seeds 30 --minutes 480 --warmup 30 --out runs/comparison.json
 ```
 
-The two configs differ in exactly one character: `pick_and_place` capacity 1
-versus 2. Both are run under seeds 1…30, and because of the named streams, seed
-*k* gives both arms identical arrivals, identical printer service times,
-identical SPI and oven draws — everything the two configurations share. The pair
-of results for a seed differ only by the change under test.
+Both configurations are run under seeds 1…30. Because of the named streams, seed
+*k* gives both arms identical arrivals and identical service-time draws
+everywhere the two configurations agree, so the pair of results for a seed
+differ only by the change under test.
 
 That is why the differences are analysed **pairwise**: subtract within a seed
 first, then average, rather than comparing two independent means. The seed-to-
@@ -402,33 +624,66 @@ seed variation that both arms share cancels instead of drowning the signal. A
 test compares a configuration against *itself* and asserts the mean difference is
 exactly `0.0` — not approximately; the pairing is exact when nothing differs.
 
-### Reading the output
+### The cheap what-if: longer conveyors
+
+Lengthening the conveyors from one board to three changes no machine at all. It
+is a length of steel, not a placement head.
 
 ```
 metric                  baseline   variant    diff           95% CI
-throughput (boards/h)      61.89     63.05   +1.16   [+0.72, +1.60]
-mean cycle time (min)      14.74      8.12   -6.61   [-7.92, -5.31]
+throughput (boards/h)      60.52     61.10   +0.59   [+0.38, +0.80]
+mean cycle time (min)      18.56     16.74   -1.82   [-2.57, -1.07]
 ```
 
-Both intervals are clear of zero, so both differences are unlikely to be
-artefacts of which seeds happened to be drawn. **That is all an interval clear of
-zero means.** It is not a claim that the difference is large, and it is certainly
-not a claim that a second placement head pays for itself — that is a question
-about the price of the machine and the value of the boards, which this program
-knows nothing about. The output says so in as many words, every time.
+Both intervals are clear of zero. Half a board an hour is a small effect — and
+that is the point. **On several individual seeds the two configurations produce
+exactly the same number of boards.** No single shift could tell you this change
+did anything; only the paired comparison across 30 seeds resolves it. That makes
+this a better demonstration of the tool than the two-placer comparison, whose
+effect is large enough to be obvious.
+
+The mechanism is worth following, because it is not the obvious one. Shortening
+the conveyors makes the *printer* block far more — 30.5% of the shift instead of
+17.6%. But blocking upstream of the bottleneck is nearly free, because the
+bottleneck is the constraint and it stays fed either way. What actually costs
+output is the small increase in how often the placer **starves**: with only one
+board of conveyor in front of it, a printer breakdown or a run of slow prints
+empties its input before the placer has finished its current board. The
+throughput loss is entirely that.
+
+### The expensive what-if: a second placement head
+
+```
+metric                  baseline   variant    diff            95% CI
+throughput (boards/h)      61.10     63.00   +1.90   [+1.28, +2.52]
+mean cycle time (min)      16.74      8.11   -8.62  [-10.42, -6.83]
+```
+
+Throughput barely moves — the baseline manages 61.1 boards/hour against an
+arrival rate of 63.2, so the second head recovers about two boards an hour and
+then hits the ceiling imposed by how fast boards are fed in. What it really buys
+is cycle time, more than halved, because the queue in front of the placer largely
+disappears. If the question is "can we ship more boards", the answer is *not
+much, feed the line faster first*. If it is "why is work-in-progress so high and
+delivery so erratic", the answer is *this*.
+
+Coupling the line made both numbers worse than they looked in stage 2: the
+baseline lost about 0.8 boards/hour and gained about two minutes of cycle time
+once the conveyors became finite. That is the honest cost of the extra realism,
+and it is why the stage 2 figures are not quoted anywhere above.
+
+### Reading the output
+
+An interval clear of zero means the difference is unlikely to be an artefact of
+which seeds happened to be drawn. **That is all it means.** It is not a claim
+that the difference is large, and it is certainly not a claim that the change
+pays for itself — that is a question about the price of conveyor, the price of a
+placement head, and the value of a board, which this program knows nothing about.
+The output says so in as many words, every time.
 
 An interval that *spans* zero is equally worth reading carefully: it means these
 runs did not separate the two configurations, not that the configurations are the
 same. More seeds narrow the interval.
-
-The result above is a good illustration of why you want both metrics. Throughput
-barely moves — the baseline manages 61.9 boards/hour against an arrival rate of
-63.2, so the second head recovers about 1.3 boards/hour and then hits the ceiling
-imposed by how fast boards are fed in. What it really buys is cycle time, nearly
-halved, because the queue in front of the placer largely disappears. If the
-question is "can we ship more boards", the answer is *not much, feed the line
-faster first*. If it is "why is work-in-progress so high and delivery so
-erratic", the answer is *this*.
 
 `--verbose` prints the per-seed table so the pairing is visible; `--out` writes
 the whole result, per-seed values included, as JSON.
@@ -461,10 +716,15 @@ number:
   dwell, the model permits one board every 40 s, which is well clear of the
   placer's 52 s and so does not distort the bottleneck. Push arrivals hard enough
   and this approximation would start to matter.
-- **Buffers between stations are unbounded.** A board that has finished printing
-  releases the printer immediately, even if the placer is backed up. Real lines
-  have short conveyor buffers, and when they fill, the upstream machine *blocks*
-  and stops working. This is the largest remaining gap, and it is stage 2b.
+- **A board is never scrapped or reworked.** Every board that enters leaves at
+  the far end, and the SPI station inspects without ever rejecting. Real solder
+  paste inspection exists precisely to reject boards, and rework is the obvious
+  next thing to model — but see the deadlock argument above, because a rework
+  loop is not a free addition.
+- **Transport between machines is instantaneous.** A conveyor holds boards but
+  takes no time to move them. For a line whose cycle times are tens of seconds
+  and whose conveyors are a metre long, this is a small error; on a line with
+  long transfer sections it would not be.
 - **Utilisation counts a service still in progress at the horizon** as busy up to
   the horizon, and divides by `capacity × window` so multi-slot stations are
   measured on the same scale as single-slot ones.
@@ -489,9 +749,13 @@ uv run smtsim run --minutes 480 --warmup 30 --config configs/baseline.toml \
 # rebuild the same tables from the saved log, without simulating again
 uv run smtsim stats runs/run1.jsonl
 
-# is a second placement head worth buying? 30 shifts each, paired by seed
-uv run smtsim compare configs/baseline.toml configs/two_placers.toml \
+# are longer conveyors worth it? 30 shifts each, paired by seed
+uv run smtsim compare configs/tight_buffers.toml configs/baseline.toml \
     --seeds 30 --minutes 480 --warmup 30 --out runs/comparison.json
+
+# is a second placement head worth buying?
+uv run smtsim compare configs/baseline.toml configs/two_placers.toml \
+    --seeds 30 --minutes 480 --warmup 30
 ```
 
 `run` options:
@@ -526,11 +790,12 @@ keeping:
 - **`line.example.toml`** is the annotated syntax reference. Every option, with
   a comment saying what it does. Start here when writing your own.
 - **`configs/*.toml`** are scenarios — concrete lines meant to be run and
-  compared. `baseline.toml` and `two_placers.toml` are the two sides of the
-  canonical what-if.
+  compared. `baseline.toml` is the reference line; `tight_buffers.toml` differs
+  from it only in conveyor lengths, and `two_placers.toml` only in the placer's
+  capacity. Each pairs with the baseline to make one what-if.
 
 Every station takes a `capacity`, a `service_time` drawn from one of four
-distributions, and an optional `failures` block:
+distributions, an optional `failures` block and an optional `input_buffer`:
 
 | kind | parameters | use it for |
 |---|---|---|
@@ -582,6 +847,8 @@ Event types, in the order a board meets them:
 | `service_interrupted` | the station broke down mid-job; work so far is kept |
 | `service_resumed` | the station was repaired and picked up where it left off |
 | `service_finished` | the station finished the board |
+| `transfer_blocked` | the finished board has nowhere to go; the station is stuck holding it |
+| `transfer_unblocked` | space opened downstream and the board moved on |
 | `board_completed` | the board left the line |
 | `station_failed` / `station_repaired` | a station's downtime window |
 | `run_started` / `run_finished` | bracket the run |
@@ -606,17 +873,31 @@ jq -r 'select(.event=="board_completed") | .t' runs/run1.jsonl | tail -1
 uv run pytest
 ```
 
-109 tests, in about three seconds. The ones that matter are properties rather
+157 tests, in about six seconds. The ones that matter are properties rather
 than golden values:
 
 - **Determinism** — the same seed writes byte-identical files; different seeds do
   not; the progress hook and the compare run-hook do not perturb results; the
   global `random` module is never touched; and a pinned hash of the default
   line's board-level events fails loudly if the model ever drifts.
-- **Common random numbers** — changing the placer's service time, or its
-  capacity, leaves every printer and arrival timestamp identical, while the
-  downstream stations demonstrably do change. A test that could not fail would
-  prove nothing, so the converse is asserted too.
+- **Common random numbers** — on an uncoupled line, changing the placer leaves
+  every printer and arrival timestamp identical. On a buffered line it leaves the
+  first ten boards identical and then demonstrably diverges. Both halves are
+  asserted: a test that had merely been loosened until it passed would still pass
+  with the streams broken.
+- **Buffer compatibility** — a line with no `input_buffer` produces the pinned
+  board-level hash, byte for byte, and emits no blocking event at all.
+- **The four time accounts** — work, block, starve and down sum to the whole
+  window per unit of capacity, across four seeds and five configurations, with
+  and without breakdowns. Starvation is computed from independently tracked
+  occupancy rather than as the residual, so the identity has something to catch.
+- **Backpressure** — a placer breakdown blocks the printer behind it and starves
+  the SPI in front of it, and the same run with unbounded buffers does the second
+  but not the first. Blocked time from `stats.py` is cross-checked against an
+  independent reduction of the same log.
+- **Deadlock freedom** — one-board conveyors everywhere plus breakdowns on three
+  stations still runs to completion, conserves boards, and keeps completing right
+  up to the horizon.
 - **Conservation** — boards arrived equals boards completed plus boards still on
   the line, with and without breakdowns.
 - **Monotonicity** — timestamps never decrease.
@@ -626,8 +907,8 @@ than golden values:
   board is served without having queued, no service starts or finishes inside a
   station's downtime window, and every completed board visits all four stations
   in line order.
-- **Capacity** — no station is ever working on more boards than its capacity,
-  which tests that the resource is doing the work rather than the station code.
+- **Capacity** — no station is ever working on plus blocking more boards than its
+  capacity, re-derived from the log independently of the stats accumulator.
 - **Breakdowns** — pooled over 40 seeds, observed MTBF and MTTR land within 10%
   of the configured values; interrupted work resumes rather than restarting;
   failures track operating time rather than the clock; an oven failure interrupts
@@ -648,9 +929,15 @@ design bet it was making — that the whole feature could be confined to the
 service block and one process beside it — held. Boards, arrivals, the stats
 reduction and the CLI were extended, not restructured.
 
-The next one is finite buffers, and it is not marked with a comment because it
-is not local: it changes when a station releases its resource, which is a change
-to the shape of `Station.visit` rather than a change inside it. See stage 2b.
+Stage 2b's finite buffers were the prediction that did *not* hold. The stage 2
+README said they would not be a local change, because they alter when a station
+releases its resource rather than what it does while holding it — and that was
+right. `Station.visit` grew a parameter, a return value and a handoff step, and
+`Line._board` had to start carrying a slot from one station to the next. The
+change was contained, but it was structural, not an extension point.
+
+What did hold is the compatibility guarantee: a station that declares no buffer
+takes no part in any of it, and the pinned hash proves it.
 
 ## Roadmap
 
@@ -662,14 +949,10 @@ MTBF/MTTR failures on operating time with work resumed rather than restarted, a
 warm-up window, availability and observed-reliability metrics, and
 `smtsim compare` with paired confidence intervals.
 
-**Stage 2b — finite buffers.** The conveyor between two stations holds a handful
-of boards, not infinitely many. When it fills, the upstream machine finishes its
-board and then cannot release it — it *blocks* — and when it empties, the
-downstream machine *starves*. This is the largest remaining gap between the model
-and a real line, and it is what makes a breakdown on the placer stop the printer
-too, which today it does not. It also weakens the common-random-numbers property
-in an interesting way, since upstream stations stop being independent of
-downstream changes.
+**Stage 2b — finite buffers.** ✅ Conveyors of a few boards between the machines,
+blocking-after-service when one fills, starving when one empties, a four-way
+partition of each station's time, and a deadlock argument that holds for a linear
+line and would not survive a rework loop.
 
 **Stage 3 — FastAPI and Postgres.** A service that accepts a line configuration,
 runs the simulation, and streams events. The event sink becomes a database writer
@@ -678,8 +961,8 @@ I/O-free design has been making since stage 1. `compare` becomes a job that
 returns a comparison id.
 
 **Stage 4 — web replay UI.** Scrub through a stored run and watch boards move
-along the line, with queue depths building and draining and stations going red
-when they fail. The event log already contains everything this needs; it is a
+along the line, with conveyors filling and draining, stations going red when they
+fail and amber when they block. The event log already contains everything this needs; it is a
 rendering problem, not a simulation one.
 
 ## Regenerating the demo
