@@ -79,10 +79,33 @@ jobs:
       - name: full suite, service tests included
         run: uv run pytest -q
 
+  web:
+    name: web
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci
+      - name: typecheck
+        run: npm run typecheck
+      - name: lint
+        run: npm run lint
+      # The reducer and the seeking need no browser and no API: they are plain
+      # TypeScript over a committed event log, which is the point of them.
+      - name: unit tests
+        run: npm test
+
   docker:
     name: docker image and compose stack
     runs-on: ubuntu-latest
-    needs: [lint, simulation]
+    needs: [lint, simulation, web]
     steps:
       - uses: actions/checkout@v4
       - uses: docker/setup-buildx-action@v3
@@ -95,6 +118,7 @@ jobs:
           POSTGRES_DB=smtsim
           SMTSIM_DATABASE_URL=postgresql://smtsim:ci-not-a-real-password@db:5432/smtsim
           SMTSIM_PORT=8000
+          SMTSIM_WEB_PORT=8080
           ENVFILE
 
       - name: build
@@ -140,6 +164,36 @@ jobs:
 
       - name: the same image also carries the CLI
         run: docker compose run --rm --no-deps -T api smtsim --version
+
+      - name: the UI is served, and reaches the API through it
+        run: |
+          curl -fsS -o /dev/null -w 'ui %{http_code}\n' http://localhost:8080/
+          curl -fsS http://localhost:8080/api/healthz
+          # A deep link must fall through to the SPA rather than 404.
+          curl -fsS -o /dev/null -w 'deep link %{http_code}\n' http://localhost:8080/anything
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: browser smoke test against the compose stack
+        working-directory: web
+        env:
+          SMTSIM_API_URL: http://localhost:8000
+          SMTSIM_WEB_URL: http://localhost:8080
+        run: |
+          npm ci
+          npx playwright install --with-deps chromium
+          npm run e2e
+
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: playwright-report
+          path: web/playwright-report/
+          retention-days: 7
 
       - name: logs on failure
         if: failure()

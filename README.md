@@ -7,17 +7,41 @@ engineer actually asks — *how many boards per hour does this line produce, whi
 machine is the constraint, how long does a board spend waiting rather than being
 worked on* — without needing the real line.
 
-![smtsim demo](demo/demo.gif)
+![The replay UI: boards moving through the line, then a placer breakdown backing up the conveyor behind it](demo/replay.gif)
 
-Stage 2 adds machine breakdowns and a paired what-if comparison. Stage 2b adds
-the conveyors between the machines, which is what turns four independent
-machines into a line: when one stops, its neighbours find out. Stage 3 puts an
-HTTP API and Postgres around all of it, and finds out whether the I/O-free core
-was worth the trouble.
+Watch the second half of that. The placer breaks down, the three-board conveyor
+in front of it fills, and the printer behind it turns amber — it has finished a
+board and has nowhere to put it. That is *blocking*, and it is the reason a line
+of four machines never runs at the speed of its slowest machine. Nothing in the
+code says "form a queue" or "propagate a stall"; it falls out of capacities and
+timing.
+
+The project is built in stages, and each one is a decision about architecture as
+much as about features:
+
+| stage | what it added |
+|---|---|
+| 1 | the line, variable service times, a deterministic event log, a CLI |
+| 2 | machine breakdowns, per-station random streams, paired what-if comparison |
+| 2b | finite conveyors, so a stall in one machine reaches its neighbours |
+| 3 | an HTTP API, Postgres, Docker — a second consumer of the same core |
+| 4 | this replay UI |
+
+The claim the whole thing rests on is that the simulation core knows nothing
+about its consumers. By stage 4 there are three — a CLI, an HTTP service and a
+browser — and `line.py` and `stations.py` have not changed since stage 2b. There
+are tests that say so rather than a claim that hopes so.
+
+<details>
+<summary>The command line and the API, for the same run</summary>
+
+![smtsim demo](demo/demo.gif)
 
 ![smtsim API](demo/api.gif)
 
 ![smtsim compare](demo/compare.gif)
+
+</details>
 
 ## The line
 
@@ -191,6 +215,13 @@ src/smtsim_service/   the HTTP service (stage 3). Depends on the simulation;
   jobs.py         the thread pool that keeps simulations off the event loop
   schemas.py      request and response models
   app.py          the routes
+
+web/                  the replay UI (stage 4). Depends on the API's HTTP
+                      contract and on nothing Python at all.
+  src/replay/     the reducer, the keyframe timeline, the playback clock —
+                  pure TypeScript over plain data, no React in any of it
+  src/api/        the REST client and the WebSocket loader
+  src/components/ the SVG line, the timeline strip, the controls, the panels
 ```
 
 The dependency arrows only ever point one way: `cli` → `compare` → `line`/`stats`
@@ -287,9 +318,10 @@ only because the property under test is about bytes on disk.
 *A different consumer can be dropped in without changing the model.* The CLI
 injects a `JsonlSink` that writes lines to a file. Stage 3's service injects a
 `DatabaseSink` that batches COPY inserts into Postgres and a `LoopBridgeSink`
-that hands events to an asyncio loop, both wrapped in a `FanOutSink`. `line.py`
-did not change — it cannot tell the difference, because `EventSink` is a
-one-method protocol:
+that hands events to an asyncio loop, both wrapped in a `FanOutSink`. Stage 4
+adds a third consumer that never touches Python at all — a browser reducing the
+same event stream in TypeScript. `line.py` did not change for any of them — it
+cannot tell the difference, because `EventSink` is a one-method protocol:
 
 ```python
 class EventSink(Protocol):
@@ -894,6 +926,218 @@ uv run pytest
 Without that variable the 31 service tests skip with those instructions and the
 169 simulation tests run as they always have.
 
+## The replay UI
+
+React and TypeScript in `web/`, built with Vite. SVG for the line rather than
+Canvas: a few dozen moving elements is comfortably inside SVG's range, and it
+keeps every board and station a real element that can be inspected, hit-tested
+and — as it turns out — asserted on from a browser test.
+
+### The WebSocket is a loader, not a clock
+
+This is the whole problem of the stage, and everything else follows from getting
+it right.
+
+A 480-minute shift streams out of the API in about a tenth of a second. Nobody
+can watch that. The naive design — render as events arrive — would produce a
+blank screen, one frantic flicker, and a finished run, and it would also mean
+seven thousand React renders in that tenth of a second.
+
+So arrival and playback are separated completely:
+
+- **The loader** takes events off the socket as fast as the network delivers
+  them and appends them to a `ReplayTimeline`. It has no notion of speed.
+- **The clock** decides what the viewer sees. Each animation frame it works out
+  how much *simulated* time should have passed from how much *wall* time
+  actually passed, times a speed multiplier, asks the timeline for the state at
+  that moment, and reports **once**.
+
+```ts
+const simDelta = (Math.min(wallDelta, 250) / 1000) * this.speed;
+this.time += simDelta;
+this.state = this.timeline.advance(this.state, this.time);
+this.emit();          // one React render, however many events were applied
+```
+
+Playback speed is therefore independent of arrival speed, which is what makes
+live mode and replay mode the same thing as far as the viewer is concerned. The
+`Math.min(wallDelta, 250)` clamp is there because a backgrounded tab hands back
+an enormous delta on return; without it, switching away and back teleports you
+to the end of the run.
+
+### The reducer is the frontend's simulation core
+
+`web/src/replay/reducer.ts` is a pure `(LineState, SimEvent) => LineState`. No
+React, no DOM, no fetch, no clock — the same discipline as `smtsim/line.py`, for
+the same reason: it can be tested by feeding it a real event log and comparing
+the answer against the one Python computed from the same log.
+
+That test is the frontend's equivalent of stage 3's byte-identity test, and it
+works the same way — two independent implementations, in two languages, reducing
+one log, agreeing on the numbers. It caught a genuine modelling gap: a board
+caught mid-service by a breakdown belonged to no list in the first version, so it
+vanished from the view *exactly* when the UI is most worth looking at. The
+conservation test came up one board short and found it.
+
+The reducer is immutable with structural sharing, which turns out to matter for
+more than tidiness — see the next section.
+
+### Seeking backwards, and the keyframe interval
+
+The reducer only moves forward. There is no inverse of "a board finished at the
+placer", so scrubbing backwards means starting from an earlier state and
+replaying. Keeping every state costs too much; keeping only the first means a
+scrub to the end of a long run replays the whole log.
+
+Hence keyframes: retain the state every N events, and seek by finding the latest
+keyframe at or before the target and replaying forward. Worst-case replay work is
+N events, which bounds seek latency independently of run length.
+
+What makes this cheap is the structural sharing. **A keyframe is not a snapshot
+that has to be copied — it is a reference to a state object that already
+exists**, and its incremental cost is only the station objects that changed since
+the previous keyframe. Retaining one is a pointer.
+
+N was measured, not guessed (`web/tests/keyframe-bench.ts`, `npm run bench`):
+
+| events | interval | keyframes | worst seek | mean seek | objects retained |
+|---|---|---|---|---|---|
+| 7,322 | none | 1 | 0.62 ms | 0.28 ms | 1 |
+| 7,322 | 1,000 | 8 | 0.11 ms | 0.04 ms | 36 |
+| 73,220 | none | 1 | 6.29 ms | 2.93 ms | 1 |
+| 73,220 | 1,000 | 74 | 0.10 ms | 0.04 ms | 366 |
+| 292,880 | none | 1 | **23.29 ms** | 11.61 ms | 1 |
+| 292,880 | 1,000 | 293 | 0.15 ms | 0.04 ms | 1,461 |
+| 292,880 | 5,000 | 59 | 0.43 ms | 0.20 ms | 291 |
+
+The honest headline is that **the 480-minute fixture does not need keyframes at
+all**: seeking its whole 7,322-event log costs 0.62 ms. They start to matter
+around 100,000 events, and at 292,880 — a multi-day horizon — seeking without
+them costs 23 ms worst case, which is a dropped frame on every scrub.
+
+1,000 is the choice. At that same 292,880-event log it seeks in 0.15 ms while
+retaining 1,461 objects, on the order of 100 KB. Halving it to 500 doubles what
+is retained and buys no latency anyone can perceive; raising it to 5,000 still
+fits inside a frame but gives up headroom to save memory that was never the
+problem.
+
+### What the colours mean
+
+Exactly the four time accounts the CLI table prints and the API returns, with no
+fifth and none renamed. They partition each station's capacity over the measured
+window and sum to 100%:
+
+| colour | account | meaning |
+|---|---|---|
+| green | **working** | a board under the head, being processed |
+| amber | **blocked** | finished a board and holding it — no room downstream |
+| grey | **starved** | free capacity with no board to work on |
+| red | **down** | under repair |
+
+Conveyors are drawn as slots and labelled `n/capacity`, so a full conveyor is
+visibly full. That is what makes blocking legible rather than something you have
+to be told about: the amber station and the 3/3 conveyor in front of it are the
+same fact, seen from two sides.
+
+Below the line, a timeline strip gives one lane per station and marks where each
+was down (red) and where it was blocked (amber), across the whole run. A
+featureless scrub bar tells you nothing about where to look; this one shows the
+interesting moments before you scrub to them, and clicking it seeks.
+
+### One code path for a live run and a finished one
+
+`WS /runs/{id}/stream` serves live events for a running run and replays stored
+events for a finished one, and says which in its opening frame. The UI has one
+implementation. The *only* thing it does differently with the answer:
+
+- the scrub bar's extent grows as events arrive, rather than being fixed;
+- a follow-the-tail toggle appears.
+
+The timeline, the reducer, the clock and every component are identical either
+way, which is what stage 3's design of that endpoint was for.
+
+**The documented failure mode is handled.** When a client cannot keep up with a
+live run the service closes with code 1013 — deliberately, because every event
+mutates line state and a stream with holes in it draws a silently wrong picture.
+The UI says so and falls back to paging `GET /runs/{id}/events`, which is
+lossless.
+
+That fallback restarts from the beginning rather than resuming where the socket
+stopped: frames carry no sequence number, and in live mode the socket starts
+wherever the run had got to, so there is no reliable way to line up what arrived
+with what to ask for next. Reloading a few thousand rows is cheap; a stream
+stitched together at the wrong offset is not.
+
+It also has to keep up with a run that is *still going*. Paging until a page
+comes back short only means the reader has caught up with what has been
+**persisted** — the first version stopped there and cheerfully reported a
+335,000-event run as complete at 40,000. It now consults the run's status and
+keeps paging until the run is genuinely finished.
+
+### The rest of it
+
+The run list polls only while something is actually running; a list of finished
+runs does not change on its own and polling it would be a request every second
+and a half for the life of the tab.
+
+The new-run form prefills from the worked example in the API's **own OpenAPI
+document**, which the service derives from `smtsim.config.BASELINE_LINE`. A
+config literal in the frontend would be a second definition of the line and it
+would drift the first time a station gained a field. 422 messages are shown in
+the service's own words — they come from the same validators the CLI uses, and
+rewording them would only make them worse:
+
+```
+config: station 'pick_and_place' input_buffer must be >= 1, or omitted for unbounded
+```
+
+The summary panel renders what `GET /runs/{id}` returns and computes nothing.
+Recomputing any of it in the browser would be a second implementation of
+`stats.py` waiting to disagree with the first.
+
+Comparisons are deliberately not built. The API serves them and the CLI reads
+them well; a paired-difference view is its own piece of work.
+
+## Running the UI
+
+Under compose, with everything else:
+
+```bash
+cp .env.example .env      # then fill in POSTGRES_PASSWORD and SMTSIM_DATABASE_URL
+docker compose up -d --wait
+open http://localhost:8080
+```
+
+nginx serves the built assets and proxies `/api` to the service, so **the browser
+only ever talks to one origin and no CORS is configured anywhere** — not in the
+service, not in nginx. The API's own port is published for convenience and for
+CI; a deployment can drop it entirely and reach the API only through the UI.
+
+For development:
+
+```bash
+make serve          # the API and its database
+make web-dev        # Vite on :5173, proxying /api to :8000
+```
+
+The dev proxy exists for the same reason as the nginx one: same origin, no CORS.
+
+### Still no authentication, and now it has a front door
+
+Stage 3 noted that the service has no authentication. Stage 4 gives it a UI, and
+a UI makes a thing look finished in a way an OpenAPI page does not. So, plainly:
+**every endpoint is open**. Anyone who can reach port 8080 can start runs, read
+every run stored, and delete any of them. There is no login, no ownership, no
+rate limiting, and a browser tab is a much easier way to find that out than curl
+was.
+
+This is a deliberate scope boundary for a portfolio project, not an oversight,
+and it is why the compose stack binds to localhost by default. It should not be
+exposed to a network you do not control. Closing the gap means an API key or
+OIDC at the edge, per-run ownership on the `runs` table, and rate limiting on
+`POST` — which is also where the runaway-configuration problem in *The service*
+stops being theoretical.
+
 ## Warm-up
 
 Both `run` and `stats` take `--warmup MINUTES`, which excludes an opening stretch
@@ -1193,9 +1437,10 @@ jq -r 'select(.event=="board_completed") | .t' runs/run1.jsonl | tail -1
 uv run pytest
 ```
 
-200 tests, in about fourteen seconds with a database and six without — the 31
-service tests skip cleanly when `SMTSIM_TEST_DATABASE_URL` is unset. The ones
-that matter are properties rather than golden values:
+202 Python tests, in about fourteen seconds with a database and six without —
+the 31 service tests skip cleanly when `SMTSIM_TEST_DATABASE_URL` is unset — plus
+46 Vitest tests and 3 Playwright specs in `web/`. The ones that matter are
+properties rather than golden values:
 
 - **Determinism** — the same seed writes byte-identical files; different seeds do
   not; the progress hook and the compare run-hook do not perturb results; the
@@ -1253,6 +1498,16 @@ that matter are properties rather than golden values:
 - **The proof** — a run submitted through the API produces events byte-identical
   to the same seed and config through the CLI. If that passes, the core really
   is untouched.
+- **The frontend reducer** — fed a real 7,322-event log committed as a fixture,
+  it must agree with the summary Python computed from the same log: boards
+  completed, boards arrived, per-station failure counts, and conservation. Two
+  implementations, two languages, one log.
+- **Seeking** — state at time *t* reached by playing forward must equal state at
+  *t* reached by seeking from a keyframe, over a dozen sample times, in both
+  directions, and identically for every keyframe interval from 1 to 100,000.
+- **The browser** — three Playwright specs against the real compose stack: play
+  advances the clock and boards come off the line, the timeline seeks forwards
+  and backwards, and a conveyor fills to its capacity and never past it.
 
 ## Extension points
 
@@ -1293,21 +1548,43 @@ behind Alembic migrations, a paired comparison endpoint, Docker Compose and CI.
 The simulation core was untouched, and there is a byte-identity test that says
 so rather than a claim that hopes so.
 
-**Stage 4 — web replay UI.** Scrub through a stored run and watch boards move
-along the line, with conveyors filling and draining, stations going red when they
-fail and amber when they block. The event log already contains everything this needs; it is a
-rendering problem, not a simulation one.
+**Stage 4 — web replay UI.** ✅ A React and TypeScript front end that replays a
+stored run or follows a live one through the same endpoint and the same code
+path. A pure reducer with keyframe seeking, a requestAnimationFrame clock
+decoupled from arrival rate, an SVG line coloured by the four time accounts, and
+conveyors that visibly fill. Served by nginx on the same origin as the API, so
+there is no CORS anywhere. The event log already contained everything it needed:
+no endpoint was added and no event type was invented for it.
+
+**Later, if it earns its place.** Authentication and per-run ownership, which is
+now the most conspicuous gap; a comparison view in the UI, since the API already
+serves everything one would need; a separate worker process so a runaway
+configuration can be killed; event logs in blob storage once runs get long enough
+that Postgres is the wrong home for them; scrap and rework, which the deadlock
+argument above says is not a free addition.
 
 ## Regenerating the demo
 
-The GIFs are recorded with [VHS](https://github.com/charmbracelet/vhs) from
-`demo/demo.tape`, `demo/compare.tape` and `demo/api.tape` (which needs a
+The terminal GIFs are recorded with [VHS](https://github.com/charmbracelet/vhs)
+from `demo/demo.tape`, `demo/compare.tape` and `demo/api.tape` (which needs a
 running Docker daemon):
 
 ```bash
 brew install vhs
 make demo        # the simulation demos
 make demo-api    # the service demo; brings the compose stack up itself
+```
+
+The replay GIF is a browser, not a terminal, so VHS cannot record it. It is a
+Playwright script that captures frames and hands them to ffmpeg
+(`web/scripts/record-replay.mjs`). It stages the recording rather than just
+pressing play: at 1000x a four-minute breakdown flashes past in a single frame,
+so it runs the line at speed, then drops to 100x over a real placer failure —
+which is the sequence the project is about.
+
+```bash
+make serve       # the stack must be up, with a finished run
+make demo-web
 ```
 
 ## Licence

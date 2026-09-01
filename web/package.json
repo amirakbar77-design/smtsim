@@ -13,7 +13,8 @@
     "test:watch": "vitest",
     "e2e": "npm run e2e:setup && playwright test",
     "e2e:setup": "node scripts/seed-run.mjs",
-    "bench": "tsx tests/keyframe-bench.ts"
+    "bench": "tsx tests/keyframe-bench.ts",
+    "record": "node scripts/record-replay.mjs"
   },
   "dependencies": {
     "react": "^18.3.1",

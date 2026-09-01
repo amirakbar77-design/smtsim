@@ -1,4 +1,4 @@
-.PHONY: install install-service test test-service lint run stats compare serve demo demo-api clean
+.PHONY: install install-service test test-service lint run stats compare serve web-dev demo demo-api demo-web clean
 
 install:
 	uv sync --extra yaml
@@ -29,13 +29,23 @@ compare:
 
 serve:
 	docker compose up -d --wait
-	@echo "API on http://localhost:8000/docs"
+	@echo "UI  on http://localhost:8080"
+	@echo "API on http://localhost:8000/docs (reached through the UI at /api)"
+
+web-dev:
+	cd web && npm install && npm run dev
 
 demo:
 	./scripts/record-demo.sh
 
 demo-api:
 	./scripts/record-demo.sh api
+
+# Records the browser, not a terminal, so it is a Playwright script rather than
+# a VHS tape. Needs `make serve` first.
+demo-web:
+	cd web && npm run e2e:setup
+	cd web && npm run record -- --out ../demo/replay.gif
 
 clean:
 	rm -rf runs/*.jsonl runs/*.json .pytest_cache
