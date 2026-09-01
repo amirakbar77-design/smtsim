@@ -1,6 +1,6 @@
 [project]
 name = "smtsim"
-version = "0.1.0"
+version = "0.2.0"
 description = "Discrete-event simulation of an SMT (surface-mount technology) PCB assembly line."
 readme = "README.md"
 requires-python = ">=3.12"

@@ -11,8 +11,10 @@ at the moment the window opens -- but the time they occupy contributes nothing.
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+import math
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
+from typing import Any
 
 from smtsim.config import SECONDS_PER_HOUR, SECONDS_PER_MINUTE
 from smtsim.events import Event, EventType
@@ -374,4 +376,187 @@ def _finish_station(station: _StationAccumulator, window_seconds: float) -> Stat
             if station.repair_seconds
             else None
         ),
+    )
+
+
+# --------------------------------------------------------------------------
+# Paired comparison statistics.
+#
+# `smtsim compare` runs two configurations across the same seeds. Thanks to the
+# per-station random streams, seed k gives both runs the same randomness
+# wherever they are identical, so the two results for a seed are paired rather
+# than independent. Analysing the paired differences removes the seed-to-seed
+# variation that both configurations share, which is why 30 seeds can resolve a
+# difference that would need far more runs if the samples were treated as
+# independent.
+#
+# A paired t interval is used rather than a bootstrap. Both were viable; the t
+# interval wins here because it is exactly reproducible without a resampling
+# RNG, and because every number it produces can be checked by hand against a
+# published t table -- which is what the tests do. Its cost is the assumption
+# that the *differences* are roughly normal, which is mild for a mean over a
+# 480-minute shift by the central limit theorem, and would be the wrong
+# assumption for something like a p95, where a bootstrap would be better.
+#
+# There is no scipy here, so the t quantile is computed from the regularised
+# incomplete beta function.
+# --------------------------------------------------------------------------
+
+
+def mean(values: Sequence[float]) -> float:
+    if not values:
+        raise ValueError("mean of an empty sequence is undefined")
+    return sum(values) / len(values)
+
+
+def sample_stdev(values: Sequence[float]) -> float:
+    """Bessel-corrected standard deviation."""
+    if len(values) < 2:
+        raise ValueError("standard deviation needs at least two values")
+    centre = mean(values)
+    return math.sqrt(sum((value - centre) ** 2 for value in values) / (len(values) - 1))
+
+
+def _beta_continued_fraction(a: float, b: float, x: float) -> float:
+    """Lentz's algorithm for the continued fraction of the incomplete beta."""
+    tiny = 1e-300
+    qab, qap, qam = a + b, a + 1.0, a - 1.0
+    c = 1.0
+    d = 1.0 - qab * x / qap
+    if abs(d) < tiny:
+        d = tiny
+    d = 1.0 / d
+    result = d
+
+    for m in range(1, 300):
+        m2 = 2 * m
+        numerator = m * (b - m) * x / ((qam + m2) * (a + m2))
+        d = 1.0 + numerator * d
+        if abs(d) < tiny:
+            d = tiny
+        c = 1.0 + numerator / c
+        if abs(c) < tiny:
+            c = tiny
+        d = 1.0 / d
+        result *= d * c
+
+        numerator = -(a + m) * (qab + m) * x / ((a + m2) * (qap + m2))
+        d = 1.0 + numerator * d
+        if abs(d) < tiny:
+            d = tiny
+        c = 1.0 + numerator / c
+        if abs(c) < tiny:
+            c = tiny
+        d = 1.0 / d
+        step = d * c
+        result *= step
+        if abs(step - 1.0) < 1e-15:
+            break
+
+    return result
+
+
+def regularised_incomplete_beta(a: float, b: float, x: float) -> float:
+    """``I_x(a, b)``, the CDF of a Beta(a, b) distribution."""
+    if x <= 0.0:
+        return 0.0
+    if x >= 1.0:
+        return 1.0
+    log_prefix = (
+        math.lgamma(a + b)
+        - math.lgamma(a)
+        - math.lgamma(b)
+        + a * math.log(x)
+        + b * math.log1p(-x)
+    )
+    prefix = math.exp(log_prefix)
+    if x < (a + 1.0) / (a + b + 2.0):
+        return prefix * _beta_continued_fraction(a, b, x) / a
+    return 1.0 - prefix * _beta_continued_fraction(b, a, 1.0 - x) / b
+
+
+def student_t_cdf(t: float, df: float) -> float:
+    """P(T <= t) for Student's t with ``df`` degrees of freedom."""
+    if df <= 0:
+        raise ValueError("degrees of freedom must be positive")
+    tail = 0.5 * regularised_incomplete_beta(df / 2.0, 0.5, df / (df + t * t))
+    return 1.0 - tail if t > 0 else tail
+
+
+def student_t_ppf(probability: float, df: float) -> float:
+    """The inverse of :func:`student_t_cdf`, found by bisection."""
+    if not 0.0 < probability < 1.0:
+        raise ValueError("probability must be strictly between 0 and 1")
+    low, high = -1.0e4, 1.0e4
+    for _ in range(200):
+        middle = 0.5 * (low + high)
+        if student_t_cdf(middle, df) < probability:
+            low = middle
+        else:
+            high = middle
+        if high - low < 1e-12:
+            break
+    return 0.5 * (low + high)
+
+
+@dataclass(frozen=True, slots=True)
+class PairedInterval:
+    """A confidence interval on the mean of a set of paired differences."""
+
+    n: int
+    mean_difference: float
+    low: float
+    high: float
+    confidence: float
+    standard_error: float
+
+    @property
+    def excludes_zero(self) -> bool:
+        """Whether the interval lies wholly above or wholly below zero.
+
+        An interval that excludes zero means the difference is unlikely to be
+        an artefact of the sample of seeds. It says nothing at all about
+        whether the difference is big enough to be worth acting on.
+        """
+        return self.low > 0.0 or self.high < 0.0
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "n": self.n,
+            "mean_difference": self.mean_difference,
+            "low": self.low,
+            "high": self.high,
+            "confidence": self.confidence,
+            "standard_error": self.standard_error,
+            "excludes_zero": self.excludes_zero,
+        }
+
+
+def paired_interval(
+    baseline: Sequence[float],
+    variant: Sequence[float],
+    confidence: float = 0.95,
+) -> PairedInterval:
+    """Confidence interval on the mean of ``variant - baseline``, pairwise."""
+    if len(baseline) != len(variant):
+        raise ValueError("paired samples must be the same length")
+    if len(baseline) < 2:
+        raise ValueError("a paired interval needs at least two pairs")
+    if not 0.0 < confidence < 1.0:
+        raise ValueError("confidence must be strictly between 0 and 1")
+
+    differences = [v - b for b, v in zip(baseline, variant, strict=True)]
+    n = len(differences)
+    centre = mean(differences)
+    standard_error = sample_stdev(differences) / math.sqrt(n)
+    critical = student_t_ppf(0.5 + confidence / 2.0, df=n - 1)
+    margin = critical * standard_error
+
+    return PairedInterval(
+        n=n,
+        mean_difference=centre,
+        low=centre - margin,
+        high=centre + margin,
+        confidence=confidence,
+        standard_error=standard_error,
     )

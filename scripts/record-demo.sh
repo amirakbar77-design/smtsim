@@ -19,5 +19,11 @@ fi
 
 export PATH="$root/.venv/bin:$PATH"
 mkdir -p runs
-vhs demo/demo.tape
-echo "Wrote demo/demo.gif ($(du -h demo/demo.gif | cut -f1))"
+
+for tape in demo/demo.tape demo/compare.tape; do
+    vhs "$tape"
+done
+
+for gif in demo/demo.gif demo/compare.gif; do
+    echo "Wrote $gif ($(du -h "$gif" | cut -f1))"
+done
