@@ -2,7 +2,7 @@
 
 Nothing in this module touches the filesystem, the terminal or the clock. It is
 handed an event sink and an optional progress callback; everything else it needs
-comes from the config object and a single seeded RNG.
+comes from the config object and the named random streams derived from its seed.
 """
 
 from __future__ import annotations
@@ -15,6 +15,7 @@ import simpy
 
 from smtsim.config import DEFAULT_LINE, LineConfig
 from smtsim.events import Event, EventSink, EventType, NullSink
+from smtsim.rng import RngStreams
 from smtsim.stations import Station
 
 ProgressHook = Callable[[float], None]
@@ -29,7 +30,8 @@ class Line:
     config: LineConfig
     sink: EventSink
     env: simpy.Environment
-    rng: random.Random
+    streams: RngStreams
+    arrival_rng: random.Random
     stations: tuple[Station, ...]
     boards_arrived: int = 0
     boards_completed: int = 0
@@ -37,12 +39,14 @@ class Line:
     @classmethod
     def build(cls, config: LineConfig, sink: EventSink | None = None) -> Line:
         env = simpy.Environment()
+        streams = RngStreams(master_seed=config.seed)
         return cls(
             config=config,
             sink=sink if sink is not None else NullSink(),
             env=env,
-            rng=random.Random(config.seed),
-            stations=tuple(Station.build(env, spec) for spec in config.stations),
+            streams=streams,
+            arrival_rng=streams.arrivals(),
+            stations=tuple(Station.build(env, spec, streams) for spec in config.stations),
         )
 
     def run(
@@ -98,7 +102,7 @@ class Line:
         """Feed bare boards into the head of the line."""
         arrivals = self.config.arrivals
         while arrivals.limit is None or self.boards_arrived < arrivals.limit:
-            yield self.env.timeout(arrivals.interarrival.sample(self.rng))
+            yield self.env.timeout(arrivals.interarrival.sample(self.arrival_rng))
             self.boards_arrived += 1
             self.env.process(self._board(self.boards_arrived))
 
@@ -107,7 +111,7 @@ class Line:
         self.sink.emit(Event(self.env.now, EventType.BOARD_ARRIVED, board_id))
 
         for station in self.stations:
-            yield from station.visit(self.env, board_id, self.rng, self.sink)
+            yield from station.visit(self.env, board_id, self.sink)
 
         self.boards_completed += 1
         self.sink.emit(Event(self.env.now, EventType.BOARD_COMPLETED, board_id))

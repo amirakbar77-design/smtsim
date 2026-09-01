@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import hashlib
+import io
 import json
 import random
 from pathlib import Path
 
 from smtsim.config import DEFAULT_LINE, LogNormal, Triangular
-from smtsim.events import ListSink, open_jsonl
+from smtsim.events import JsonlSink, ListSink, open_jsonl
 from smtsim.line import simulate
 
 from conftest import SHIFT_SECONDS, run_events
@@ -80,3 +82,25 @@ def test_run_is_reproducible_across_independently_built_lines() -> None:
     """Building a fresh Line must not inherit state from an earlier one."""
     assert [e.to_dict() for e in run_events(seed=5)] == [e.to_dict() for e in run_events(seed=5)]
     assert DEFAULT_LINE.seed == 42
+
+
+GOLDEN_NO_FAILURE_LOG_SHA256 = "a69523aacc819c7d70a7544200740c4153437c784a868f2b8a3fc6393c2c161c"
+
+
+def test_the_default_line_log_matches_its_pinned_hash() -> None:
+    """A tripwire on the default, failure-free line.
+
+    Any change to the model, the stream derivation or the log format moves this
+    hash. Nothing about stage 2 should: a line with no `failures` block must
+    take exactly the path it took before breakdowns existed. Regenerate with::
+
+        python -c "import hashlib, io; from smtsim.events import JsonlSink; \
+        from smtsim.line import simulate; b = io.StringIO(); \
+        simulate(3600.0, sink=JsonlSink(b), seed=42); \
+        print(hashlib.sha256(b.getvalue().encode()).hexdigest())"
+    """
+    buffer = io.StringIO()
+    simulate(60 * 60.0, sink=JsonlSink(buffer), seed=42)
+
+    digest = hashlib.sha256(buffer.getvalue().encode("utf-8")).hexdigest()
+    assert digest == GOLDEN_NO_FAILURE_LOG_SHA256

@@ -3,6 +3,10 @@
 A station is a SimPy resource plus a service-time distribution. Waiting boards
 are held by the resource's own request queue, so queueing is a consequence of
 capacity and timing rather than something this module implements.
+
+Each station owns its own random stream rather than being handed one. A station
+therefore cannot draw from another station's numbers even by accident, which is
+what makes two configurations comparable under a shared master seed.
 """
 
 from __future__ import annotations
@@ -15,6 +19,7 @@ import simpy
 
 from smtsim.config import StationConfig
 from smtsim.events import Event, EventSink, EventType
+from smtsim.rng import RngStreams
 
 
 @dataclass(slots=True)
@@ -23,10 +28,20 @@ class Station:
 
     config: StationConfig
     resource: simpy.Resource
+    service_rng: random.Random
 
     @classmethod
-    def build(cls, env: simpy.Environment, config: StationConfig) -> Station:
-        return cls(config=config, resource=simpy.Resource(env, capacity=config.capacity))
+    def build(
+        cls,
+        env: simpy.Environment,
+        config: StationConfig,
+        streams: RngStreams,
+    ) -> Station:
+        return cls(
+            config=config,
+            resource=simpy.Resource(env, capacity=config.capacity),
+            service_rng=streams.station_service(config.name),
+        )
 
     @property
     def name(self) -> str:
@@ -40,7 +55,6 @@ class Station:
         self,
         env: simpy.Environment,
         board_id: int,
-        rng: random.Random,
         sink: EventSink,
     ) -> Generator[simpy.Event, None, None]:
         """Take one board through this station: queue, seize, serve, release."""
@@ -56,6 +70,6 @@ class Station:
             # waits for repair before resuming. Confining failures to this block
             # keeps the rest of the model unchanged. See README "Roadmap".
             # ------------------------------------------------------------------
-            yield env.timeout(self.config.service_time.sample(rng))
+            yield env.timeout(self.config.service_time.sample(self.service_rng))
 
             sink.emit(Event(env.now, EventType.SERVICE_FINISHED, board_id, self.name))
