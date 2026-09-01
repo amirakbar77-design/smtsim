@@ -28,7 +28,7 @@ def derive_seed(master_seed: int, stream_name: str) -> int:
     per process by PYTHONHASHSEED, which would make runs reproducible only
     within a single interpreter.
     """
-    payload = f"{master_seed}:{stream_name}".encode("utf-8")
+    payload = f"{master_seed}:{stream_name}".encode()
     return int.from_bytes(hashlib.blake2b(payload, digest_size=8).digest(), "big")
 
 

@@ -121,7 +121,13 @@ def test_interrupted_work_resumes_rather_than_restarting() -> None:
             if event.type is EventType.SERVICE_INTERRUPTED:
                 interrupted.add(event.board_id)
             else:
-                totals.append((event.board_id, worked.pop(event.board_id), event.board_id in interrupted))
+                totals.append(
+                    (
+                        event.board_id,
+                        worked.pop(event.board_id),
+                        event.board_id in interrupted,
+                    )
+                )
 
     resumed = [work for _, work, was_interrupted in totals if was_interrupted]
     clean = [work for _, work, was_interrupted in totals if not was_interrupted]
@@ -160,7 +166,7 @@ def test_a_boards_wall_clock_at_a_station_covers_work_plus_downtime() -> None:
         elif event.type is EventType.SERVICE_FINISHED:
             spans.setdefault(event.board_id, {})["end"] = event.time
 
-    for board, span in spans.items():
+    for _board, span in spans.items():
         if "start" not in span or "end" not in span:
             continue
         overlap = sum(

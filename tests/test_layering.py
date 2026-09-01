@@ -16,7 +16,15 @@ SOURCE_ROOT = Path(__file__).resolve().parent.parent / "src"
 CORE = SOURCE_ROOT / "smtsim"
 SERVICE = SOURCE_ROOT / "smtsim_service"
 
-FORBIDDEN_IN_CORE = ("smtsim_service", "fastapi", "uvicorn", "psycopg", "sqlalchemy", "alembic", "pydantic")
+FORBIDDEN_IN_CORE = (
+    "smtsim_service",
+    "fastapi",
+    "uvicorn",
+    "psycopg",
+    "sqlalchemy",
+    "alembic",
+    "pydantic",
+)
 
 
 def imported_modules(path: Path) -> set[str]:
@@ -60,7 +68,9 @@ def test_the_core_runs_without_any_service_dependency_installed() -> None:
         "if m.split('.')[0] in ('fastapi','psycopg','sqlalchemy','alembic','pydantic','uvicorn')); "
         "print(','.join(leaked))"
     )
-    result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=True)
+    result = subprocess.run(
+        [sys.executable, "-c", code], capture_output=True, text=True, check=True
+    )
 
     assert result.stdout.strip() == "", f"importing smtsim pulled in {result.stdout.strip()}"
 

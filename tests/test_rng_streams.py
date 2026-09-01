@@ -42,7 +42,11 @@ def run_buffered(config: LineConfig, seed: int = 42) -> list:
 
 def timestamps(events, station: str) -> list[tuple[int, str, float]]:
     kinds = {EventType.SERVICE_STARTED, EventType.SERVICE_FINISHED}
-    return [(e.board_id, str(e.type), e.time) for e in events if e.station == station and e.type in kinds]
+    return [
+        (e.board_id, str(e.type), e.time)
+        for e in events
+        if e.station == station and e.type in kinds
+    ]
 
 
 def run_with_placer(service_time, seed: int = 42) -> list:
@@ -155,7 +159,12 @@ def test_streams_are_independent_of_one_another() -> None:
     streams = RngStreams(master_seed=42)
     draws = {
         name: [streams.stream(name).random() for _ in range(5)]
-        for name in (ARRIVALS_STREAM, "station:a:service", "station:a:failures", "station:b:service")
+        for name in (
+            ARRIVALS_STREAM,
+            "station:a:service",
+            "station:a:failures",
+            "station:b:service",
+        )
     }
 
     assert len({tuple(values) for values in draws.values()}) == len(draws)

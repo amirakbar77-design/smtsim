@@ -6,17 +6,18 @@ from pathlib import Path
 
 import pytest
 
+from conftest import run_events
 from smtsim.events import Event, EventType, read_jsonl, write_jsonl
 from smtsim.stats import percentile, summarise
-
-from conftest import run_events
 
 
 def hand_built_log() -> list[Event]:
     """Two boards through one single-slot station, with a deliberate overlap."""
     line = {"name": "toy", "stations": [{"name": "press", "capacity": 1}]}
     return [
-        Event(0.0, EventType.RUN_STARTED, detail={"horizon_seconds": 100.0, "seed": 3, "line": line}),
+        Event(
+            0.0, EventType.RUN_STARTED, detail={"horizon_seconds": 100.0, "seed": 3, "line": line}
+        ),
         Event(0.0, EventType.BOARD_ARRIVED, 1),
         Event(0.0, EventType.QUEUE_ENTERED, 1, "press"),
         Event(0.0, EventType.SERVICE_STARTED, 1, "press"),

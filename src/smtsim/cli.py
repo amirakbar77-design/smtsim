@@ -358,7 +358,7 @@ def command_run(args: argparse.Namespace, console: Console) -> int:
                 task = progress.add_task(
                     f"simulating {config.name}",
                     total=horizon,
-                    clock="0 / %d min" % args.minutes,
+                    clock=f"0 / {args.minutes:.0f} min",
                 )
 
                 def on_progress(now: float) -> None:

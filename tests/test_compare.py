@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import math
-from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -184,7 +183,11 @@ def test_the_run_hook_observes_every_run_without_changing_the_result() -> None:
     seen: list[tuple[int, int]] = []
     without = compare(baseline, variant, seed_sequence(3), SHIFT)
     with_hook = compare(
-        baseline, variant, seed_sequence(3), SHIFT, on_run=lambda done, total: seen.append((done, total))
+        baseline,
+        variant,
+        seed_sequence(3),
+        SHIFT,
+        on_run=lambda done, total: seen.append((done, total)),
     )
 
     assert seen == [(1, 6), (2, 6), (3, 6), (4, 6), (5, 6), (6, 6)]

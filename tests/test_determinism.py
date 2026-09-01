@@ -3,18 +3,15 @@
 from __future__ import annotations
 
 import hashlib
-import io
 import json
 import random
+from dataclasses import replace
 from pathlib import Path
 
-from dataclasses import replace
-
-from smtsim.config import DEFAULT_LINE, FailureConfig, LogNormal, Triangular
-from smtsim.events import EventType, JsonlSink, ListSink, open_jsonl
-from smtsim.line import simulate
-
 from conftest import SHIFT_SECONDS, run_events
+from smtsim.config import DEFAULT_LINE, FailureConfig, LogNormal, Triangular
+from smtsim.events import EventType, ListSink, open_jsonl
+from smtsim.line import simulate
 
 
 def write_log(path: Path, seed: int, minutes: float = 480.0) -> bytes:
@@ -132,10 +129,19 @@ def test_adding_failures_to_one_station_does_not_disturb_the_others() -> None:
     with_failures = ListSink()
     baseline = ListSink()
     simulate(SHIFT_SECONDS, sink=baseline, seed=42)
-    simulate(SHIFT_SECONDS, config=replace(DEFAULT_LINE, stations=stations), sink=with_failures, seed=42)
+    simulate(
+        SHIFT_SECONDS,
+        config=replace(DEFAULT_LINE, stations=stations),
+        sink=with_failures,
+        seed=42,
+    )
 
     def printer(sink):
-        return [(e.board_id, str(e.type), e.time) for e in sink if e.station == "solder_paste_printer"]
+        return [
+            (e.board_id, str(e.type), e.time)
+            for e in sink
+            if e.station == "solder_paste_printer"
+        ]
 
     assert printer(baseline) == printer(with_failures)
     assert any(e.type is EventType.STATION_FAILED for e in with_failures)

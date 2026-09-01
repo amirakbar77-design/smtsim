@@ -4,10 +4,9 @@ from __future__ import annotations
 
 import pytest
 
+from conftest import run_events
 from smtsim.events import Event, EventType
 from smtsim.stats import summarise
-
-from conftest import run_events
 
 SEEDS = (1, 42, 1234)
 

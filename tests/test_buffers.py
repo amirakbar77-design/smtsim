@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import hashlib
 import io
-import json
 from dataclasses import replace
 
 import pytest
@@ -28,14 +27,18 @@ FLAKY = FailureConfig(mtbf=1800.0, mttr=420.0, mttr_cv=0.4)
 CONVEYOR_STATIONS = ("pick_and_place", "spi", "reflow_oven")
 
 
-def buffered(size: int | None, failing: tuple[str, ...] = (), capacity: int | None = None) -> LineConfig:
+def buffered(
+    size: int | None, failing: tuple[str, ...] = (), capacity: int | None = None
+) -> LineConfig:
     """The default line with a uniform conveyor length, optionally flaky."""
     stations = tuple(
         replace(
             station,
             input_buffer=size if station.name in CONVEYOR_STATIONS else None,
             failures=FLAKY if station.name in failing else None,
-            capacity=capacity if capacity and station.name == "pick_and_place" else station.capacity,
+            capacity=(
+                capacity if capacity and station.name == "pick_and_place" else station.capacity
+            ),
         )
         for station in DEFAULT_LINE.stations
     )
