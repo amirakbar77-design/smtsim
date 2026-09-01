@@ -19,11 +19,23 @@ from dataclasses import dataclass
 from typing import Any
 
 from smtsim.config import SECONDS_PER_MINUTE, LineConfig
-from smtsim.events import ListSink
+from smtsim.events import EventSink, FanOutSink, ListSink
 from smtsim.line import simulate
 from smtsim.stats import LineStats, PairedInterval, mean, paired_interval, summarise
 
 RunHook = Callable[[int, int], None]
+
+# Called before each constituent run with its role ("baseline" or "variant"),
+# seed and config; may return a sink to receive that run's events alongside the
+# in-memory one used for the statistics. This is how the service persists the
+# runs behind a comparison without this module knowing what a database is.
+SinkFactory = Callable[[str, int, LineConfig], EventSink | None]
+
+# Called after each constituent run with its role, seed, config and full stats.
+StatsHook = Callable[[str, int, LineConfig, LineStats], None]
+
+BASELINE = "baseline"
+VARIANT = "variant"
 
 DEFAULT_SEEDS = 30
 
@@ -142,12 +154,20 @@ def run_once(
     seed: int,
     horizon_seconds: float,
     warmup_seconds: float,
-) -> SeedResult:
-    """Simulate one configuration under one seed and extract the metrics."""
-    sink = ListSink()
-    simulate(horizon_seconds, config=config, sink=sink, seed=seed, warmup_seconds=warmup_seconds)
-    stats = summarise(sink.events)
-    return SeedResult(seed=seed, values={metric.key: metric.extract(stats) for metric in METRICS})
+    sink: EventSink | None = None,
+) -> tuple[SeedResult, LineStats]:
+    """Simulate one configuration under one seed and extract the metrics.
+
+    An extra ``sink`` is fanned out to alongside the in-memory one the
+    statistics are computed from. Sinks are pure observers, so adding one
+    cannot change what the simulation does.
+    """
+    collector = ListSink()
+    target: EventSink = collector if sink is None else FanOutSink((collector, sink))
+    simulate(horizon_seconds, config=config, sink=target, seed=seed, warmup_seconds=warmup_seconds)
+    stats = summarise(collector.events)
+    result = SeedResult(seed=seed, values={metric.key: metric.extract(stats) for metric in METRICS})
+    return result, stats
 
 
 def compare(
@@ -158,6 +178,8 @@ def compare(
     warmup_seconds: float = 0.0,
     confidence: float = 0.95,
     on_run: RunHook | None = None,
+    sink_factory: SinkFactory | None = None,
+    on_stats: StatsHook | None = None,
 ) -> Comparison:
     """Run both configurations across ``seeds`` and analyse the paired differences.
 
@@ -174,8 +196,15 @@ def compare(
     variant_runs: list[SeedResult] = []
 
     for seed in seeds:
-        for config, results in ((baseline, baseline_runs), (variant, variant_runs)):
-            results.append(run_once(config, seed, horizon_seconds, warmup_seconds))
+        for role, config, results in (
+            (BASELINE, baseline, baseline_runs),
+            (VARIANT, variant, variant_runs),
+        ):
+            sink = None if sink_factory is None else sink_factory(role, seed, config)
+            result, stats = run_once(config, seed, horizon_seconds, warmup_seconds, sink=sink)
+            results.append(result)
+            if on_stats is not None:
+                on_stats(role, seed, config, stats)
             finished += 1
             if on_run is not None:
                 on_run(finished, total)

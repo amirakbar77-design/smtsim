@@ -8,7 +8,7 @@ here know anything about files or JSON.
 from __future__ import annotations
 
 import json
-from collections.abc import Iterable, Iterator, Mapping
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from enum import StrEnum
@@ -109,9 +109,14 @@ class JsonlSink:
 
 @dataclass(slots=True)
 class FanOutSink:
-    """Broadcasts each event to several sinks."""
+    """Broadcasts each event to several sinks.
 
-    sinks: tuple[EventSink, ...]
+    This is how a run is persisted to more than one place at once -- a database
+    and a file, say, or a database and a live stream -- without the simulation
+    knowing that more than one consumer exists.
+    """
+
+    sinks: Sequence[EventSink]
 
     def emit(self, event: Event) -> None:
         for sink in self.sinks:

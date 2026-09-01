@@ -13,6 +13,15 @@ dependencies = [
 
 [project.optional-dependencies]
 yaml = ["pyyaml>=6.0"]
+service = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.32",
+    "psycopg[binary,pool]>=3.2",
+    "alembic>=1.14",
+    "sqlalchemy>=2.0",
+    "pydantic-settings>=2.6",
+    "websockets>=13.0",
+]
 
 [project.scripts]
 smtsim = "smtsim.cli:main"
@@ -20,6 +29,9 @@ smtsim = "smtsim.cli:main"
 [dependency-groups]
 dev = [
     "pytest>=8.0",
+    "pytest-asyncio>=0.24",
+    "httpx>=0.27",
+    "ruff>=0.8",
 ]
 
 [build-system]
@@ -27,8 +39,19 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/smtsim"]
+packages = ["src/smtsim", "src/smtsim_service"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
+asyncio_mode = "auto"
+markers = ["service: tests that need a Postgres database"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "W"]
+ignore = ["B008"]

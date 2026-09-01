@@ -135,6 +135,39 @@ class StationStats:
     def can_block(self) -> bool:
         return self.blocked_slot_seconds > 0.0
 
+    def to_dict(self) -> dict[str, Any]:
+        """The whole station row, ready for JSON.
+
+        Everything the terminal table shows is here, so a consumer that renders
+        this -- the API, and stage 4's replay UI -- never has to recompute a
+        metric or re-read an event log to draw the same picture.
+        """
+        return {
+            "name": self.name,
+            "capacity": self.capacity,
+            "measured_slot_seconds": self.measured_slot_seconds,
+            "working_slot_seconds": self.working_slot_seconds,
+            "blocked_slot_seconds": self.blocked_slot_seconds,
+            "starved_slot_seconds": self.starved_slot_seconds,
+            "down_slot_seconds": self.down_slot_seconds,
+            "working_fraction": self.working_fraction,
+            "blocked_fraction": self.blocked_fraction,
+            "starved_fraction": self.starved_fraction,
+            "down_fraction": self.down_fraction,
+            "utilisation": self.utilisation,
+            "utilisation_uptime": self.utilisation_uptime,
+            "availability": self.availability,
+            "boards_started": self.boards_started,
+            "boards_finished": self.boards_finished,
+            "max_queue_length": self.max_queue_length,
+            "mean_wait_seconds": self.mean_wait_seconds,
+            "mean_service_seconds": self.mean_service_seconds,
+            "failures": self.failures,
+            "downtime_seconds": self.downtime_seconds,
+            "observed_mtbf_seconds": self.observed_mtbf_seconds,
+            "observed_mttr_seconds": self.observed_mttr_seconds,
+        }
+
 
 @dataclass(frozen=True, slots=True)
 class LineStats:
@@ -187,6 +220,28 @@ class LineStats:
             if station.name == name:
                 return station
         raise KeyError(name)
+
+    def to_dict(self) -> dict[str, Any]:
+        """The whole summary, ready for JSON."""
+        bottleneck = self.bottleneck
+        return {
+            "line_name": self.line_name,
+            "seed": self.seed,
+            "horizon_seconds": self.horizon_seconds,
+            "warmup_seconds": self.warmup_seconds,
+            "window_seconds": self.window_seconds,
+            "boards_arrived": self.boards_arrived,
+            "boards_completed": self.boards_completed,
+            "boards_in_system": self.boards_in_system,
+            "throughput_per_hour": self.throughput_per_hour,
+            "mean_cycle_time_seconds": self.mean_cycle_time_seconds,
+            "p95_cycle_time_seconds": self.p95_cycle_time_seconds,
+            "mean_cycle_time_minutes": self.mean_cycle_time_minutes,
+            "p95_cycle_time_minutes": self.p95_cycle_time_minutes,
+            "has_failures": self.has_failures,
+            "bottleneck": None if bottleneck is None else bottleneck.name,
+            "stations": [station.to_dict() for station in self.stations],
+        }
 
 
 @dataclass(slots=True)
