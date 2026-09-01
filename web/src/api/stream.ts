@@ -13,7 +13,7 @@
  * by the playback clock, which is why speed is independent of arrival rate.
  */
 
-import { getEvents } from "./client";
+import { getEvents, getRun } from "./client";
 import type { SimEvent } from "../replay/types";
 
 export type StreamMode = "live" | "replay";
@@ -91,8 +91,8 @@ export function openRunStream(runId: string, callbacks: StreamCallbacks): Stream
     if (close.code === WS_TRY_AGAIN_LATER) {
       fellBack = true;
       callbacks.onFellBack(
-        close.reason ||
-          "the live stream outran this browser, so the run is being loaded from storage instead",
+        "The live stream outran this browser, so the run is being loaded from storage " +
+          `instead — which is lossless. The service said: ${close.reason || "client fell behind"}.`,
       );
       void pageEverything(runId, callbacks);
     }
@@ -106,6 +106,9 @@ export function openRunStream(runId: string, callbacks: StreamCallbacks): Stream
   };
 }
 
+const TERMINAL: ReadonlySet<string> = new Set(["succeeded", "failed"]);
+const CATCH_UP_DELAY_MS = 500;
+
 /**
  * Load the whole log through the REST endpoint.
  *
@@ -114,29 +117,51 @@ export function openRunStream(runId: string, callbacks: StreamCallbacks): Stream
  * starts wherever the run had got to, so there is no reliable way to line up
  * what arrived with what to ask for next. Reloading a few thousand rows is
  * cheap; a stream stitched together at the wrong offset is not.
+ *
+ * The run may still be going. Paging until a page comes back short only means
+ * we have caught up with what has been *persisted*, not that the run is over --
+ * the first version of this stopped there and reported a 300,000-event run as
+ * complete at 40,000. So when the pages run out, the run's status decides
+ * whether to wait for more or to stop.
  */
 export async function pageEverything(
   runId: string,
   callbacks: Pick<StreamCallbacks, "onEvents" | "onEnd" | "onError">,
   pageSize = 1000,
+  delayMs = CATCH_UP_DELAY_MS,
 ): Promise<void> {
+  const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
   try {
     let after = 0;
     for (;;) {
       const page = await getEvents(runId, after, pageSize);
-      callbacks.onEvents(
-        page.items.map((row) => ({
-          t: row.t,
-          event: row.event as SimEvent["event"],
-          board: row.board,
-          station: row.station,
-          detail: row.detail,
-        })),
-      );
-      if (page.next_after === null) break;
-      after = page.next_after;
+      if (page.items.length > 0) {
+        callbacks.onEvents(
+          page.items.map((row) => ({
+            t: row.t,
+            event: row.event as SimEvent["event"],
+            board: row.board,
+            station: row.station,
+            detail: row.detail,
+          })),
+        );
+        after = page.items[page.items.length - 1]?.seq ?? after;
+      }
+
+      if (page.next_after !== null) continue;
+
+      // Caught up with storage. Whether that is the end depends on the run.
+      const run = await getRun(runId);
+      if (TERMINAL.has(run.status)) {
+        // One last page, in case events landed between the two requests.
+        const tail = await getEvents(runId, after, pageSize);
+        if (tail.items.length > 0) continue;
+        callbacks.onEnd(run.status, run.error);
+        return;
+      }
+      await wait(delayMs);
     }
-    callbacks.onEnd("succeeded", null);
   } catch (error) {
     callbacks.onError(error instanceof Error ? error.message : String(error));
   }

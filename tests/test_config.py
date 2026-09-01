@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from smtsim.config import (
+    BASELINE_LINE,
     DEFAULT_LINE,
     Constant,
     LogNormal,
@@ -124,3 +125,32 @@ def test_yaml_config_loads_when_the_optional_extra_is_installed(tmp_path: Path) 
     config = load_line_config(path)
     assert config.name == "yaml line"
     assert config.station("printer").service_time == Constant(seconds=20.0)
+
+
+def test_the_baseline_constant_matches_its_config_file() -> None:
+    """BASELINE_LINE and configs/baseline.toml must not drift apart.
+
+    The constant exists so that nothing has to read a file at import time; the
+    file exists so the line can be edited and compared without touching Python.
+    Two definitions of one thing is exactly the situation this project refuses
+    elsewhere, so it is pinned rather than trusted.
+    """
+    repo_root = Path(__file__).resolve().parent.parent
+    from_file = load_line_config(repo_root / "configs" / "baseline.toml")
+
+    assert from_file == BASELINE_LINE
+
+
+def test_the_baseline_is_the_default_line_with_conveyors_and_breakdowns() -> None:
+    assert [s.name for s in BASELINE_LINE.stations] == [s.name for s in DEFAULT_LINE.stations]
+    assert BASELINE_LINE.arrivals == DEFAULT_LINE.arrivals
+
+    for station in BASELINE_LINE.stations:
+        default = DEFAULT_LINE.station(station.name)
+        assert station.service_time == default.service_time
+        assert station.capacity == default.capacity
+
+    assert BASELINE_LINE.station("solder_paste_printer").input_buffer is None
+    assert BASELINE_LINE.station("pick_and_place").input_buffer == 3
+    assert BASELINE_LINE.station("spi").failures is None
+    assert BASELINE_LINE.station("reflow_oven").failures is not None

@@ -24,7 +24,7 @@ from uuid import UUID
 from pydantic import BaseModel, Field, field_validator
 
 from smtsim.config import (
-    DEFAULT_LINE,
+    BASELINE_LINE,
     Constant,
     Distribution,
     LineConfig,
@@ -32,7 +32,12 @@ from smtsim.config import (
     line_config_from_dict,
 )
 
-CONFIG_EXAMPLE = DEFAULT_LINE.to_dict()
+# The worked example the API advertises, and what the web UI prefills its
+# new-run form from. BASELINE_LINE rather than DEFAULT_LINE on purpose: the
+# default line has no conveyors and no breakdowns, so a run submitted from the
+# example would never block and never fail -- which are the two things the
+# replay UI exists to show.
+CONFIG_EXAMPLE = BASELINE_LINE.to_dict()
 
 
 def arrivals_advance_time(interarrival: Distribution) -> bool:

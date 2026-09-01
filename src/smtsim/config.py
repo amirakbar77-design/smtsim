@@ -291,6 +291,42 @@ DEFAULT_LINE = LineConfig(
 )
 
 
+# The line this project is actually about: the default machines, plus the
+# conveyors between them and the reliability figures they run at. Everything the
+# README quotes -- the station table, both what-if comparisons, the demos -- is
+# this line, and it is what the API advertises as its worked example.
+#
+# Written as the *difference* from DEFAULT_LINE rather than transcribed, so the
+# machines themselves are still defined once. It duplicates the buffer and
+# failure numbers in configs/baseline.toml, which a test pins: see
+# tests/test_config.py::test_the_baseline_constant_matches_its_config_file.
+#
+# It is a constant rather than a `load_line_config("configs/baseline.toml")` at
+# import time because a library module should not read a file whose path depends
+# on the caller's working directory, and should not fail to import when it is
+# missing.
+BASELINE_LINE = replace(
+    DEFAULT_LINE,
+    stations=(
+        replace(
+            DEFAULT_LINE.station("solder_paste_printer"),
+            failures=FailureConfig(mtbf=7200.0, mttr=240.0, mttr_cv=0.5),
+        ),
+        replace(
+            DEFAULT_LINE.station("pick_and_place"),
+            input_buffer=3,
+            failures=FailureConfig(mtbf=5400.0, mttr=420.0, mttr_cv=0.6),
+        ),
+        replace(DEFAULT_LINE.station("spi"), input_buffer=3),
+        replace(
+            DEFAULT_LINE.station("reflow_oven"),
+            input_buffer=3,
+            failures=FailureConfig(mtbf=28800.0, mttr=900.0, mttr_cv=0.4),
+        ),
+    ),
+)
+
+
 def line_config_from_dict(data: dict[str, Any]) -> LineConfig:
     """Build a :class:`LineConfig` from a parsed config document."""
     try:

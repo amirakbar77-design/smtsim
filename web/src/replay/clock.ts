@@ -118,11 +118,22 @@ export class PlaybackClock {
   }
 
   /**
-   * New events arrived. Nothing about playback changes unless we are following
-   * the tail -- which is the single concession live mode gets.
+   * New events arrived.
+   *
+   * Following the tail is the single concession live mode gets. Otherwise
+   * playback is untouched -- except that a paused clock re-derives its state,
+   * because the timeline it was reading has just grown underneath it. Without
+   * that, a freshly loaded run shows nothing at all until you press play: the
+   * clock sits at t=0 holding the empty state it was constructed with, and the
+   * `run_started` header that creates the stations has never been applied.
    */
   onLoaded(): void {
-    if (this.following) this.seek(this.timeline.loadedUntil);
+    if (this.following) {
+      this.seek(this.timeline.loadedUntil);
+    } else if (!this.playing) {
+      this.state = this.timeline.stateAtTime(this.time);
+      this.emit();
+    }
   }
 
   dispose(): void {

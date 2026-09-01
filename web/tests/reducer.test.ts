@@ -106,7 +106,7 @@ describe("the reducer against a real run", () => {
   });
 
   it("sees blocking where the API reports it, and nowhere else", () => {
-    let sawBlocked = new Set<string>();
+    const sawBlocked = new Set<string>();
     let state = initialState();
     for (const event of LOG) {
       state = reduce(state, event);
