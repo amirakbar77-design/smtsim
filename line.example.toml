@@ -1,0 +1,51 @@
+# Example line configuration: pass it with `smtsim run --config line.example.toml`.
+#
+# This file reproduces the built-in defaults. Edit the numbers to ask what-if
+# questions -- for example, give pick_and_place a second head by setting its
+# capacity to 2, and watch the bottleneck move to the reflow oven.
+#
+# TOML is read with the standard library. The same document in YAML also works
+# if you installed the optional extra: `uv sync --extra yaml`.
+
+name = "SMT line 1"
+seed = 42
+
+# Bare boards enter the line every ~57 s. Because that is close to the
+# pick-and-place cycle time, a queue builds in front of it on its own.
+[arrivals.interarrival]
+kind = "lognormal"
+mean = 57.0
+cv = 0.45
+# limit = 500   # stop feeding after this many boards; omit for a continuous feed
+
+[[stations]]
+name = "solder_paste_printer"
+capacity = 1
+[stations.service_time]
+kind = "lognormal"
+mean = 25.0
+cv = 0.15
+
+[[stations]]
+name = "pick_and_place"
+capacity = 1
+[stations.service_time]
+kind = "lognormal"
+mean = 52.0
+cv = 0.20
+
+[[stations]]
+name = "spi"
+capacity = 1
+[stations.service_time]
+kind = "triangular"
+low = 14.0
+mode = 17.0
+high = 26.0
+
+[[stations]]
+name = "reflow_oven"
+capacity = 6
+[stations.service_time]
+kind = "constant"
+seconds = 240.0

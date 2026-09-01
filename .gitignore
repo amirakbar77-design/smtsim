@@ -1,0 +1,16 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.egg-info/
+build/
+dist/
+
+# Environments
+.venv/
+
+# Simulation output
+runs/*.jsonl
+
+# macOS
+.DS_Store
