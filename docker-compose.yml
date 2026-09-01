@@ -1,0 +1,71 @@
+name: smtsim
+
+services:
+  db:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:?set POSTGRES_USER in .env}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: ${POSTGRES_DB:?set POSTGRES_DB in .env}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+      start_period: 5s
+    restart: unless-stopped
+
+  # Runs alembic once and exits. The API waits for it to complete
+  # successfully, so the schema is always at head before anything serves
+  # traffic -- and exactly one process ever migrates.
+  migrate:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    environment:
+      SMTSIM_DATABASE_URL: ${SMTSIM_DATABASE_URL:?set SMTSIM_DATABASE_URL in .env}
+    command: ["alembic", "upgrade", "head"]
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: "no"
+
+  api:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    environment:
+      SMTSIM_DATABASE_URL: ${SMTSIM_DATABASE_URL:?set SMTSIM_DATABASE_URL in .env}
+      SMTSIM_LOG_LEVEL: ${SMTSIM_LOG_LEVEL:-info}
+      SMTSIM_WORKER_THREADS: ${SMTSIM_WORKER_THREADS:-2}
+      SMTSIM_DB_POOL_MIN: ${SMTSIM_DB_POOL_MIN:-1}
+      SMTSIM_DB_POOL_MAX: ${SMTSIM_DB_POOL_MAX:-8}
+      SMTSIM_WS_BATCH_SIZE: ${SMTSIM_WS_BATCH_SIZE:-250}
+      SMTSIM_WS_BATCH_INTERVAL_MS: ${SMTSIM_WS_BATCH_INTERVAL_MS:-100}
+      SMTSIM_WS_QUEUE_MAXSIZE: ${SMTSIM_WS_QUEUE_MAXSIZE:-10000}
+      SMTSIM_MAX_MINUTES: ${SMTSIM_MAX_MINUTES:-20160}
+      SMTSIM_MAX_COMPARISON_SEEDS: ${SMTSIM_MAX_COMPARISON_SEEDS:-200}
+    ports:
+      - "${SMTSIM_PORT:-8000}:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          python -c "import urllib.request,sys;
+          sys.exit(0 if urllib.request.urlopen('http://localhost:8000/healthz',
+          timeout=3).status == 200 else 1)"
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 5s
+    restart: unless-stopped
+
+volumes:
+  pgdata:
