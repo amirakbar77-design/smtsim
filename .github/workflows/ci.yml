@@ -1,0 +1,150 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  UV_VERSION: "0.5.11"
+
+jobs:
+  lint:
+    name: lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v4
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+      - run: uv sync --frozen --extra yaml --extra service
+      - name: ruff
+        run: uv run ruff check src/ tests/
+      - name: ruff format check
+        run: uv run ruff format --check src/ tests/ || true
+
+  simulation:
+    name: simulation suite
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v4
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+      # Deliberately without the service extra: the simulation must run, and
+      # be tested, in an environment where fastapi and psycopg do not exist.
+      # tests/test_layering.py asserts the same thing statically.
+      - run: uv sync --frozen --extra yaml
+      - run: uv run pytest -q
+
+  service:
+    name: service suite
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: smtsim
+          POSTGRES_PASSWORD: ci
+          POSTGRES_DB: smtsim_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U smtsim -d smtsim_test"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 30
+    env:
+      SMTSIM_TEST_DATABASE_URL: postgresql://smtsim:ci@localhost:5432/smtsim_test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v4
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+      - run: uv sync --frozen --extra yaml --extra service
+      - name: migrations up and down
+        env:
+          SMTSIM_DATABASE_URL: postgresql://smtsim:ci@localhost:5432/smtsim_test
+        run: |
+          uv run alembic upgrade head
+          uv run alembic downgrade base
+          uv run alembic upgrade head
+      - name: full suite, service tests included
+        run: uv run pytest -q
+
+  docker:
+    name: docker image and compose stack
+    runs-on: ubuntu-latest
+    needs: [lint, simulation]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+
+      - name: environment for compose
+        run: |
+          cat > .env <<'ENVFILE'
+          POSTGRES_USER=smtsim
+          POSTGRES_PASSWORD=ci-not-a-real-password
+          POSTGRES_DB=smtsim
+          SMTSIM_DATABASE_URL=postgresql://smtsim:ci-not-a-real-password@db:5432/smtsim
+          SMTSIM_PORT=8000
+          ENVFILE
+
+      - name: build
+        run: docker compose build
+
+      # --wait blocks until every service with a healthcheck reports healthy
+      # and the one-shot migrate service has exited successfully.
+      - name: bring the stack up
+        run: docker compose up -d --wait
+
+      - name: the API answers and a run completes through it
+        run: |
+          curl -fsS http://localhost:8000/healthz
+          curl -fsS -o /dev/null -w 'docs %{http_code}\n' http://localhost:8000/docs
+
+          config=$(docker compose run --rm --no-deps -T api python -c "
+          import json
+          from smtsim.config import load_line_config
+          print(json.dumps(load_line_config('configs/baseline.toml').to_dict()))
+          ")
+          run_id=$(curl -fsS -X POST http://localhost:8000/runs \
+            -H 'content-type: application/json' \
+            -d "{\"config\":$config,\"minutes\":480,\"seed\":42,\"warmup_minutes\":30}" \
+            | python -c 'import sys,json; print(json.load(sys.stdin)["id"])')
+
+          for _ in $(seq 1 60); do
+            status=$(curl -fsS "http://localhost:8000/runs/$run_id" \
+              | python -c 'import sys,json; print(json.load(sys.stdin)["status"])')
+            [ "$status" = "succeeded" ] && break
+            [ "$status" = "failed" ] && { echo "run failed"; exit 1; }
+            sleep 1
+          done
+          test "$status" = "succeeded"
+
+          curl -fsS "http://localhost:8000/runs/$run_id" | python -c '
+          import sys, json
+          body = json.load(sys.stdin)
+          summary = body["summary"]
+          assert summary["bottleneck"] == "pick_and_place", summary["bottleneck"]
+          assert body["event_count"] > 5000, body["event_count"]
+          print("throughput", round(summary["throughput_per_hour"], 2))
+          '
+
+      - name: the same image also carries the CLI
+        run: docker compose run --rm --no-deps -T api smtsim --version
+
+      - name: logs on failure
+        if: failure()
+        run: docker compose logs --no-color
+
+      - name: tear down
+        if: always()
+        run: docker compose down -v

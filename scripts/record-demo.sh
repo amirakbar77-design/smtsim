@@ -17,13 +17,21 @@ if [ ! -x .venv/bin/smtsim ]; then
     exit 1
 fi
 
-export PATH="$root/.venv/bin:$PATH"
+export PATH="$root/.venv/bin:/opt/homebrew/bin:$PATH"
 mkdir -p runs
 
-for tape in demo/demo.tape demo/compare.tape; do
+# `record-demo.sh api` records only the API tape, which needs Docker running.
+if [ "${1:-}" = "api" ]; then
+    tapes=(demo/api.tape)
+else
+    tapes=(demo/demo.tape demo/compare.tape)
+fi
+
+for tape in "${tapes[@]}"; do
     vhs "$tape"
 done
 
-for gif in demo/demo.gif demo/compare.gif; do
+for tape in "${tapes[@]}"; do
+    gif="${tape%.tape}.gif"
     echo "Wrote $gif ($(du -h "$gif" | cut -f1))"
 done
