@@ -1,45 +1,49 @@
-# smtsim — a discrete-event simulation of an SMT assembly line
+# smtsim
 
-A simulated surface-mount technology (SMT) line: bare printed circuit boards are
-fed in at one end, pass through four machines in sequence, and come out the other
-end populated and soldered. The simulation answers the questions a process
-engineer actually asks — *how many boards per hour does this line produce, which
-machine is the constraint, how long does a board spend waiting rather than being
-worked on* — without needing the real line.
+A simulation of a circuit-board assembly line — four machines in a row, with
+short conveyors between them — for answering questions like *is a second machine
+worth buying?* or *would longer conveyors help?* without touching the real line.
 
-![The replay UI: boards moving through the line, then a placer breakdown backing up the conveyor behind it](demo/replay.gif)
+![A replay of one shift: boards move through four machines, then the second machine breaks down, the conveyor feeding it fills up, and the machine behind it stops because it has nowhere to put the board it just finished](demo/replay.gif)
 
-Watch the second half of that. The placer breaks down, the three-board conveyor
-in front of it fills, and the printer behind it turns amber — it has finished a
-board and has nowhere to put it. That is *blocking*, and it is the reason a line
-of four machines never runs at the speed of its slowest machine. Nothing in the
-code says "form a queue" or "propagate a stall"; it falls out of capacities and
-timing.
+Watch the second machine go red. The conveyor in front of it fills to 3/3, the
+machine behind it turns amber because it has finished a board and has nowhere to
+put it, and the two machines after it run dry. That stall spreading in both
+directions is what the project is about.
 
-The project is built in stages, and each one is a decision about architecture as
-much as about features:
+## Quick start
 
-| stage | what it added |
-|---|---|
-| 1 | the line, variable service times, a deterministic event log, a CLI |
-| 2 | machine breakdowns, per-station random streams, paired what-if comparison |
-| 2b | finite conveyors, so a stall in one machine reaches its neighbours |
-| 3 | an HTTP API, Postgres, Docker — a second consumer of the same core |
-| 4 | this replay UI |
+```bash
+cp .env.example .env          # then set POSTGRES_PASSWORD and SMTSIM_DATABASE_URL
+docker compose up -d --wait   # the web UI above, on http://localhost:8080
+make run                      # or: one shift in the terminal — no Docker, no database
+```
 
-The claim the whole thing rests on is that the simulation core knows nothing
-about its consumers. By stage 4 there are three — a CLI, an HTTP service and a
-browser — and `line.py` and `stations.py` have not changed since stage 2b. There
-are tests that say so rather than a claim that hopes so.
+## What this demonstrates
+
+- **Queues nobody wrote.** No queue data structure exists anywhere in the
+  repository; boards pile up, and stalls spread, purely from capacity and
+  timing. → [Buffers, blocking and starving](#buffers-blocking-and-starving)
+- **A core that never changed.** The simulation gained a database, an HTTP API
+  and this browser UI without a line changing in `line.py` or `stations.py`,
+  and a test proves it by submitting a run through the API and asserting the
+  events are byte-identical to the CLI's. → [The service](#the-service)
+- **Comparison with error bars.** One shift resolves nothing — the same line
+  varies from about 9 to 26 minutes of cycle time on the seed alone — so
+  what-ifs run across 30 paired seeds and report a confidence
+  interval. → [Comparing two configurations](#comparing-two-configurations)
+- **Properties, not golden values.** 202 Python tests, 46 in TypeScript, 3 in a
+  browser: boards are conserved, time accounts sum to capacity, seeking
+  backwards lands where playing forwards would. → [Tests](#tests)
 
 <details>
-<summary>The command line and the API, for the same run</summary>
+<summary>The same simulation on the command line, over the API, and as a what-if comparison</summary>
 
-![smtsim demo](demo/demo.gif)
+![The CLI running a shift and printing its summary](demo/demo.gif)
 
-![smtsim API](demo/api.gif)
+![The compose stack coming up and a run streaming over the API](demo/api.gif)
 
-![smtsim compare](demo/compare.gif)
+![A paired comparison of two line configurations](demo/compare.gif)
 
 </details>
 

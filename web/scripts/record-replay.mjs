@@ -7,10 +7,15 @@
  *
  * The recording is staged rather than just pressing play. At 1000x an
  * eight-hour shift takes half a minute and a four-minute breakdown flashes past
- * in a frame, so the GIF runs the line at speed to show boards flowing, then
- * drops to 100x over a real placer failure -- which is the sequence the whole
- * project is about: the placer goes down, the conveyor behind it fills, and the
- * printer turns amber because it has nowhere to put the board it just finished.
+ * in a frame, so the GIF runs the line at speed just long enough to show boards
+ * flowing, then drops to 100x over a real placer failure -- which is the
+ * sequence the whole project is about: the placer goes down, the conveyor
+ * behind it fills, the printer turns amber because it has nowhere to put the
+ * board it just finished, and the two stations after it run dry.
+ *
+ * The intro is kept short on purpose. This GIF sits at the top of the README
+ * and loops; a viewer who has to wait ten seconds for the interesting part has
+ * usually already scrolled.
  *
  * Usage: npm run record -- --out ../demo/replay.gif
  */
@@ -103,19 +108,21 @@ const seekTo = (seconds) =>
     scrub.dispatchEvent(new Event("change", { bubbles: true }));
   }, seconds);
 
-// 1. The line running at speed.
+// 1. Enough of the line at speed to establish that boards flow through it.
 await setSpeed(1000);
 await page.getByTestId("play-toggle").click();
-await shoot(FPS * 9);
+await shoot(FPS * 4);
 await page.getByTestId("play-toggle").click();
 
 // 2. The same run, slowed down over a real breakdown.
 if (failure !== null) {
-  await seekTo(Math.max(0, failure.from - 90));
+  // Start a little before the failure so the healthy line is visible first,
+  // then run through the breakdown and out the other side of the repair.
+  await seekTo(Math.max(0, failure.from - 120));
   await setSpeed(100);
   await page.waitForTimeout(300);
   await page.getByTestId("play-toggle").click();
-  await shoot(FPS * 13);
+  await shoot(FPS * 12);
   await page.getByTestId("play-toggle").click();
 }
 
